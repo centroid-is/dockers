@@ -1,4 +1,4 @@
-name: Publish Shrimp Batcher as Docker Image
+name: Publish Data logger as Docker Image
 
 on:
   workflow_dispatch:  # Manual trigger
