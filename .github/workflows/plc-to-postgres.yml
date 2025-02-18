@@ -1,4 +1,4 @@
-name: Publish Data logger as Docker Image
+name: Publish Data Logger as Docker Image
 
 on:
   workflow_dispatch:  # Manual trigger
@@ -11,44 +11,44 @@ jobs:
   publish-docker:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout blossom repository
         uses: actions/checkout@v4
+        with:
+          repository: centroid-is/blossom
+          token: ${{ secrets.GH_PAT }}
+          path: blossom
+          ref: add_brim_logger
 
-      - name: Get latest release info
-        id: release
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+      - name: Set up Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Get version from Cargo.toml
+        id: cargo_version
+        working-directory: blossom/brim_data_logger
         run: |
-          # Fetch release info from the upstream repository
-          LATEST_RELEASE=$(gh release view --repo centroid-is/blossom --json tagName,assets)
-          
-          # Remove a potential "v" prefix from the tag name
-          VERSION=$(echo "$LATEST_RELEASE" | jq -r '.tagName' | sed 's/^v//')
-          
-          # Find the asset URL for shrimp-batcher.tar.gz (not used directly here but available)
-          ASSET_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name=="brim-data-logger.tar.gz") | .apiUrl')
-          
+          # Extract the version from Cargo.toml (expects a line like: version = "1.2.3")
+          VERSION=$(sed -n 's/^version\s*=\s*"\(.*\)"/\1/p' Cargo.toml | head -n1)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "asset_url=$ASSET_URL" >> $GITHUB_OUTPUT
+          echo "Found Cargo.toml version: $VERSION"
 
-      - name: Download data-logger asset
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+      - name: Build artifact
+        working-directory: blossom/brim_data_logger
         run: |
-          # Download the release asset matching the version tag
-          gh release download --repo centroid-is/blossom --pattern "brim-data-logger.tar.gz" "v${{ steps.release.outputs.version }}"
+          cargo build --release --target x86_64-unknown-linux-musl
 
-      - name: Extract binary and prepare Docker build context
+      - name: Prepare Docker build context
+        working-directory: blossom/brim_data_logger
         run: |
-          # Extract the tarball (assumes it contains the 'shrimp-batcher' binary)
-          tar -xzvf brim-data-logger.tar.gz
-          
-          # Create a Dockerfile that uses Alpine and copies the binary into the container
+          # Create a Dockerfile that copies the built binary into an Alpine-based image.
+          # Adjust the binary name if it differs from 'brim-data-logger'
           cat <<'EOF' > Dockerfile
           FROM alpine:latest
-          COPY brim-data-logger /usr/local/bin/brim-data-logger
-          RUN chmod +x /usr/local/bin/brim-data-logger
-          ENTRYPOINT ["/usr/local/bin/brim-data-logger"]
+          COPY target/x86_64-unknown-linux-musl/release/brim_data_logger /usr/local/bin/brim_data_logger
+          RUN chmod +x /usr/local/bin/brim_data_logger
+          ENTRYPOINT ["/usr/local/bin/brim_data_logger"]
           EOF
 
       - name: Log in to GitHub Container Registry
@@ -61,7 +61,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
         with:
-          context: .
+          context: blossom/brim_data_logger
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/brim-data-logger:${{ steps.release.outputs.version }},ghcr.io/${{ github.repository_owner }}/brim-data-logger:latest
-
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/brim-data-logger:${{ steps.cargo_version.outputs.version }},ghcr.io/${{ github.repository_owner }}/brim-data-logger:latest
