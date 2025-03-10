@@ -17,7 +17,7 @@ jobs:
           repository: centroid-is/blossom
           token: ${{ secrets.GH_PAT }}
           path: blossom
-          ref: add_brim_logger
+          ref: main
 
       - name: Set up Rust toolchain
         uses: actions-rs/toolchain@v1
