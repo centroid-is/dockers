@@ -30,14 +30,15 @@ WORKDIR $APP_DIR
 # You can use build args to specify the location of your app and libs
 # Example: docker build --build-arg APP_BIN=flutter_elinux_wayland --build-arg FLUTTER_ENGINE=./bundle ...
 ARG APP_BIN
-ENV APP_BINARY=${APP_BIN}
+ENV BINARY=${APP_BIN}
 ARG APP_BUNDLE
+ENV BUNDLE=${APP_BUNDLE}
 
 COPY ${APP_BUNDLE} $APP_DIR/
 
 RUN chown -R centroid:centroid $APP_DIR \
-    && chmod +x $APP_DIR/${APP_BIN}
+    && chmod +x $APP_DIR/${BINARY}
 
 USER centroid
 # Set entrypoint to your binary
-ENTRYPOINT ["sh", "-c", "./${APP_BINARY}"]
+ENTRYPOINT ["sh", "-c", "./${BINARY} --bundle=${BUNDLE} --fullscreen --onscreen-keyboard"]
