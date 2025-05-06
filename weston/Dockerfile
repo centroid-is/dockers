@@ -1,7 +1,7 @@
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends weston openssl \
+    && apt-get install -y --no-install-recommends weston openssl libgl1-mesa-dri libgbm1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Enable testing repo, update weston from testing, then disable testing repo
