@@ -33,14 +33,13 @@ ARG APP_DIR=/flutter-app
 WORKDIR $APP_DIR
 
 # You can use build args to specify the location of your app and libs
-# Example: docker build --build-arg APP_BIN=./build/elinux/x64/release/runner/flutter_elinux_wayland --build-arg FLUTTER_ENGINE=./elinux/flutter/ephemeral ...
+# Example: docker build --build-arg APP_BIN=flutter_elinux_wayland --build-arg FLUTTER_ENGINE=./bundle ...
 ARG APP_BIN
-ARG FLUTTER_ENGINE
-ARG FLUTTER_ELINUX_WAYLAND
+ARG APP_BUNDLE
 
 COPY ${APP_BIN} $APP_DIR/
-COPY ${FLUTTER_ENGINE} $APP_DIR/
-COPY ${FLUTTER_ELINUX_WAYLAND} $APP_DIR/
+COPY ${APP_BUNDLE} $APP_DIR/
+RUN mv ${APP_BUNDLE}/* . && rm -rf ${APP_BUNDLE}
 
 RUN useradd -m centroid \
     && chown -R centroid:centroid $APP_DIR \
