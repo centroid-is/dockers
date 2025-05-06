@@ -4,9 +4,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libstdc++6 \
     libgcc-s1 \
-    libm6 \
     libc6 \
-    libdl2 \
     libfontconfig1 \
     libpthread-stubs0-dev \
     libxkbcommon0 \
@@ -20,8 +18,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     zlib1g \
     libpng16-16 \
-    libbrotlidec1 \
-    libbrotlicommon1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m centroid
