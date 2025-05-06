@@ -23,7 +23,7 @@ jobs:
           repository: centroid-is/sildarvinnsla
           token: ${{ secrets.GH_PAT }}
           path: sildarvinnsla
-          ref: main
+          ref: master
 
       - name: Get commit SHA
         id: get_sha
