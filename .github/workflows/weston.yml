@@ -9,6 +9,10 @@ on:
       - 'weston/**'
       - '.github/workflows/weston.yml'
 
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
