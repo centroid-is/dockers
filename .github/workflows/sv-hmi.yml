@@ -73,8 +73,6 @@ jobs:
   
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
-        env:
-          IMAGE_TAG: ${{ needs.elinux-build.outputs.sildarvinnsla_sha }}
         with:
           context: flutter
           push: true
@@ -83,4 +81,5 @@ jobs:
             FLUTTER_ENGINE=artifacts/libflutter_engine.so
             FLUTTER_ELINUX_WAYLAND=artifacts/libflutter_elinux_wayland.so
           tags: |
-            ghcr.io/${{ github.repository_owner }}/sv-hmi:${IMAGE_TAG},ghcr.io/${{ github.repository_owner }}/sv-hmi:latest
+            ghcr.io/${{ github.repository_owner }}/sv-hmi:${{ needs.elinux-build.outputs.sildarvinnsla_sha }}
+            ghcr.io/${{ github.repository_owner }}/sv-hmi:latest
