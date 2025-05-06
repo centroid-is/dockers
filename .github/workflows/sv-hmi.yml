@@ -42,14 +42,21 @@ jobs:
         working-directory: sildarvinnsla/hmi
         run: flutter-elinux build elinux --release
 
+      - name: Move build artifacts
+        working-directory: sildarvinnsla/hmi
+        run: | 
+          mv build/elinux/x64/release/bundle/sildarvinnsla .
+          mv build/elinux/x64/release/bundle/lib/libflutter_engine.so .
+          mv build/elinux/x64/release/bundle/lib/libflutter_elinux_wayland.so .
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: sildarvinnsla-artifacts
           path: |
-            sildarvinnsla/hmi/build/elinux/x64/release/bundle/sildarvinnsla
-            sildarvinnsla/hmi/build/elinux/x64/release/bundle/lib/libflutter_engine.so
-            sildarvinnsla/hmi/build/elinux/x64/release/bundle/lib/libflutter_elinux_wayland.so
+            sildarvinnsla/hmi/sildarvinnsla
+            sildarvinnsla/hmi/libflutter_engine.so
+            sildarvinnsla/hmi/libflutter_elinux_wayland.so
 
   docker-build:
     needs: elinux-build
