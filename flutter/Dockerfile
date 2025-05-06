@@ -21,7 +21,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m centroid
-USER centroid
 
 # Copy in your Flutter libraries and executable
 # These will be supplied at build time
@@ -31,14 +30,14 @@ WORKDIR $APP_DIR
 # You can use build args to specify the location of your app and libs
 # Example: docker build --build-arg APP_BIN=flutter_elinux_wayland --build-arg FLUTTER_ENGINE=./bundle ...
 ARG APP_BIN
+ENV APP_BINARY=${APP_BIN}
 ARG APP_BUNDLE
 
 COPY ${APP_BUNDLE} $APP_DIR/
-RUN mv ${APP_BUNDLE}/* . && rm -rf ${APP_BUNDLE}
 
-RUN useradd -m centroid \
-    && chown -R centroid:centroid $APP_DIR \
-    && chmod +x $APP_DIR/$(basename ${APP_BIN})
+RUN chown -R centroid:centroid $APP_DIR \
+    && chmod +x $APP_DIR/${APP_BIN}
 
+USER centroid
 # Set entrypoint to your binary
-ENTRYPOINT ["sh", "-c", "./$(basename ${APP_BIN})"]
+ENTRYPOINT ["sh", "-c", "./${APP_BINARY}"]
