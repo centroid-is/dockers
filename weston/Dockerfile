@@ -43,5 +43,7 @@ RUN mkdir -p /home/centroid/vnc/certs \
 USER centroid
 WORKDIR /home/centroid
 
+EXPOSE 5900
+
 # Default command
-CMD ["weston"]
+CMD ["weston", "-c", "/home/centroid/.config/weston.ini"]
