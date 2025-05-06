@@ -86,8 +86,8 @@ jobs:
           push: true
           build-args: |
             APP_BIN=artifacts/sildarvinnsla
-            FLUTTER_ENGINE=artifacts/libflutter_engine.so
-            FLUTTER_ELINUX_WAYLAND=artifacts/libflutter_elinux_wayland.so
+            FLUTTER_ENGINE=artifacts/lib/libflutter_engine.so
+            FLUTTER_ELINUX_WAYLAND=artifacts/lib/libflutter_elinux_wayland.so
           tags: |
             ghcr.io/${{ github.repository_owner }}/sv-hmi:${{ needs.elinux-build.outputs.sildarvinnsla_sha }}
             ghcr.io/${{ github.repository_owner }}/sv-hmi:latest
