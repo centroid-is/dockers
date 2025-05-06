@@ -62,7 +62,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: sildarvinnsla-artifacts
-          path: artifacts
+          path: flutter/artifacts
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v2
