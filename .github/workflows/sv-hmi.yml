@@ -44,8 +44,7 @@ jobs:
 
       - name: Move build artifacts
         working-directory: sildarvinnsla/hmi
-        run: | 
-          rm -r build/elinux/x64/release/bundle/data
+        run: |
           mkdir -p assets
           mv build/elinux/x64/release/bundle/* assets/
 

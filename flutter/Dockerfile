@@ -40,5 +40,4 @@ RUN chown -R centroid:centroid $APP_DIR \
     && chmod +x $APP_DIR/${BINARY}
 
 USER centroid
-# Set entrypoint to your binary
-ENTRYPOINT ["sh", "-c", "./${BINARY} --bundle=${BUNDLE} --fullscreen --onscreen-keyboard"]
+CMD ["./${BINARY}", "--bundle=${APP_DIR}", "--fullscreen", "--onscreen-keyboard"]
