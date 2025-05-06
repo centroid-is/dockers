@@ -53,6 +53,8 @@ jobs:
     needs: elinux-build
     runs-on: ubuntu-latest
     steps:
+      - name: Vulnarable
+        run: git config --system --add safe.directory '*'
       - name: Checkout Docker repo
         uses: actions/checkout@v4
 
