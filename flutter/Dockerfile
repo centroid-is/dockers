@@ -40,4 +40,4 @@ RUN chown -R centroid:centroid $APP_DIR \
     && chmod +x $APP_DIR/${BINARY}
 
 USER centroid
-CMD ["./${BINARY}", "--bundle=${APP_DIR}", "--fullscreen", "--onscreen-keyboard"]
+CMD ["/bin/sh", "-c", "./${BINARY} --bundle=${APP_DIR} --fullscreen --onscreen-keyboard"]
