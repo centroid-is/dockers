@@ -40,13 +40,13 @@ jobs:
 
       - name: Build for eLinux
         working-directory: sildarvinnsla/hmi
-        run: flutter-elinux build elinux --debug
+        run: flutter-elinux build elinux --release
 
       - name: Move build artifacts
         working-directory: sildarvinnsla/hmi
         run: |
           mkdir -p assets
-          mv build/elinux/x64/debug/bundle/* assets/
+          mv build/elinux/x64/release/bundle/* assets/
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
