@@ -40,7 +40,7 @@ jobs:
 
       - name: Build for eLinux
         working-directory: sildarvinnsla/hmi
-        run: flutter-elinux build elinux --release
+        run: flutter-elinux build elinux --debug
 
       - name: Move build artifacts
         working-directory: sildarvinnsla/hmi
