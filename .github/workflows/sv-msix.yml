@@ -58,11 +58,11 @@ jobs:
           "msixupload=$msixuploadPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "msixname=$($msix.Name)"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Upload artifact (.msixupload)
+      - name: Upload artifact (.msix)
         uses: actions/upload-artifact@v4
         with:
-          name: app.msixupload
-          path: ${{ steps.pkg.outputs.msixupload }}
+          name: sv.msix
+          path: ${{ steps.pkg.outputs.msix }}
 
       - name: Get Azure AD token for Dev Center
         working-directory: sildarvinnsla/hmi
