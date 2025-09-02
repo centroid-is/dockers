@@ -57,6 +57,7 @@ jobs:
 
           "msixupload=$msixuploadPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "msixname=$($msix.Name)"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "msix=$($msix.FullName)"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Upload artifact (.msix)
         uses: actions/upload-artifact@v4
