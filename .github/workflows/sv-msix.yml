@@ -112,6 +112,24 @@ jobs:
           Set-ApplicationSubmission -AppId $env:STORE_APP_ID -UpdatedSubmission $sub
           Complete-ApplicationSubmission -AppId $env:STORE_APP_ID -SubmissionId $sub.id
 
+          # After Complete-ApplicationSubmission...
+          $submissionId = $sub.id
+
+          # Poll until we leave the in-progress states
+          $inProgress = @('PendingCommit','CommitStarted','PreProcessing','Certification','PendingPublication','Publishing')
+          $terminalOk = @('Published','Release')
+          $terminalBad = @('CommitFailed','PreProcessingFailed','CertificationFailed','PublishFailed','ReleaseFailed','Canceled')
+
+          do {
+            Start-Sleep -Seconds 30
+            $status = (Get-ApplicationSubmissionStatus -AppId $env:STORE_APP_ID -SubmissionId $submissionId).status
+            Write-Host "Submission $submissionId status: $status"
+          } while ($inProgress -contains $status)
+
+          if ($terminalBad -contains $status) { throw "Store submission failed: $status" }
+          if ($terminalOk  -contains $status) { Write-Host "Store submission completed: $status" }
+          else { Write-Warning "Unexpected terminal status: $status" }
+
       - name: Upload submission artifacts  # optional, inspect what StoreBroker produced
         if: always()
         uses: actions/upload-artifact@v4
