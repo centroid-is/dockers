@@ -69,9 +69,11 @@ jobs:
           Import-Module StoreBroker
 
           # Validate required secrets early
-          $required = 'STORE_APP_ID','STORE_TENANT_ID','STORE_CLIENT_ID','STORE_CLIENT_SECRET'
-          $missing  = $required | Where-Object { -not $env:$_ }
-          if ($missing) { throw "Missing required secrets: $($missing -join ', ')" }
+          $required = @('STORE_APP_ID','STORE_TENANT_ID','STORE_CLIENT_ID','STORE_CLIENT_SECRET')
+          $missing  = $required | Where-Object {
+            [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_))
+          }
+          if ($missing.Count) { throw "Missing required secrets: $($missing -join ', ')" }
 
           # Authenticate once; StoreBroker handles token refresh
           $sec  = ConvertTo-SecureString $env:STORE_CLIENT_SECRET -AsPlainText -Force
