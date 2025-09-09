@@ -1,7 +1,7 @@
-name: Store publish (MSIX)
+name: Store publish (MSIX via StoreBroker)
 
 on:
-  workflow_dispatch: 
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -10,9 +10,13 @@ permissions:
 jobs:
   publish:
     runs-on: windows-latest
+    env:
+      STORE_APP_ID:      ${{ secrets.STORE_PRODUCT_ID }}     # Your app's AppId
+      STORE_TENANT_ID:   ${{ secrets.STORE_TENANT_ID }}
+      STORE_CLIENT_ID:   ${{ secrets.STORE_CLIENT_ID }}
+      STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
+
     steps:
-      - name: Vulnarable
-        run: git config --system --add safe.directory '*'
       - uses: actions/checkout@v4
         with:
           repository: centroid-is/sildarvinnsla
@@ -20,8 +24,7 @@ jobs:
           path: sildarvinnsla
           ref: master
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with: { channel: stable }
 
       - name: Build Windows
@@ -30,34 +33,17 @@ jobs:
 
       - name: Create MSIX for Store
         working-directory: sildarvinnsla/hmi
-        run: |
-          dart run msix:create --store
         shell: powershell
+        run: dart run msix:create --store
 
-      - name: Locate MSIX and create .msixupload
-        working-directory: sildarvinnsla/hmi
+      - name: Find built MSIX
         id: pkg
+        working-directory: sildarvinnsla/hmi
         shell: powershell
         run: |
           $msix = Get-ChildItem -Recurse -Filter *.msix | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $msix) { throw "No .msix file found" }
-
-          $dir = $msix.DirectoryName
-          $zipPath = Join-Path $dir "app.zip"
-          $msixuploadPath = Join-Path $dir "app.msixupload"
-
-          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-          if (Test-Path $msixuploadPath) { Remove-Item $msixuploadPath -Force }
-
-          # Create a ZIP that contains the .msix
-          Compress-Archive -Path $msix.FullName -DestinationPath $zipPath -Force
-
-          # Rename/move to .msixupload (Store expects this extension)
-          Move-Item -Path $zipPath -Destination $msixuploadPath -Force
-
-          "msixupload=$msixuploadPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "msixname=$($msix.Name)"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "msix=$($msix.FullName)"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          if (-not $msix) { throw "No .msix found" }
+          "msix=$($msix.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Upload artifact (.msix)
         uses: actions/upload-artifact@v4
@@ -65,110 +51,33 @@ jobs:
           name: sv.msix
           path: ${{ steps.pkg.outputs.msix }}
 
-      - name: Get Azure AD token for Dev Center
+      - name: Publish via StoreBroker
         working-directory: sildarvinnsla/hmi
-        id: token
         shell: powershell
         run: |
-          $body = @{
-            grant_type    = "client_credentials"
-            client_id     = "${{ secrets.STORE_CLIENT_ID }}"
-            client_secret = "${{ secrets.STORE_CLIENT_SECRET }}"
-            resource      = "https://manage.devcenter.microsoft.com"
+          Install-Module StoreBroker -Scope CurrentUser -Force
+
+          # Auth once; StoreBroker handles tokens for you
+          $sec  = ConvertTo-SecureString $env:STORE_CLIENT_SECRET -AsPlainText -Force
+          $cred = New-Object pscredential($env:STORE_CLIENT_ID, $sec)
+          Set-StoreBrokerAuthentication -TenantId $env:STORE_TENANT_ID -Credential $cred
+
+          # Create (or reuse) a minimal submission config
+          if (-not (Test-Path "submission.json")) {
+            New-StoreBrokerConfigFile -Path submission.json -AppId $env:STORE_APP_ID
           }
-          $resp = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/${{ secrets.STORE_TENANT_ID }}/oauth2/token" -Body $body
-          if (-not $resp.access_token) { throw "Failed to obtain access token" }
-          "access_token=$($resp.access_token)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Create draft submission
-        working-directory: sildarvinnsla/hmi
-        id: create
-        shell: powershell
-        run: |
-          $headers = @{
-            Authorization = "Bearer ${{ steps.token.outputs.access_token }}"
-            Accept        = "application/json"
-          }
-          $appId = "${{ secrets.STORE_PRODUCT_ID }}"
-          $url = "https://manage.devcenter.microsoft.com/v1.0/my/applications/$appId/submissions"
+          # Bundle the MSIX into a Store-ready package.zip + package.json
+          New-SubmissionPackage -ConfigPath .\submission.json `
+                                -AppxPath "${{ steps.pkg.outputs.msix }}" `
+                                -OutPath out -OutName package
 
-          # Although the docs say “no body”, some gateways now enforce JSON media type.
-          # Sending {} with Content-Type application/json is accepted.
-          $sub = Invoke-RestMethod -Headers $headers -Method Post -Uri $url -ContentType "application/json" -Body "{}"
-
-          if (-not $sub.id) { throw "Create submission failed" }
-          "submission_id=$($sub.id)"              | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "file_upload_url=$($sub.fileUploadUrl)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-  
-      - name: Update submission metadata (register package placeholder)
-        working-directory: sildarvinnsla/hmi
-        shell: powershell
-        run: |
-          $headers = @{
-            Authorization = "Bearer ${{ steps.token.outputs.access_token }}"
-            "Content-Type" = "application/json"
-            Accept = "application/json"
-          }
-          $appId = "${{ secrets.STORE_PRODUCT_ID }}"
-          $subId = "${{ steps.create.outputs.submission_id }}"
-
-          # IMPORTANT: This must be the MSIX inside the zip
-          $fileName = "${{ steps.pkg.outputs.msixname }}"
-
-          $body = @{
-            applicationPackages = @(@{
-              fileName = $fileName
-              fileStatus = "PendingUpload"
-              minimumDirectXVersion = "None"
-              minimumSystemRam = "None"
-            })
-          } | ConvertTo-Json -Depth 10
-
-          $url = "https://manage.devcenter.microsoft.com/v1.0/my/applications/$appId/submissions/$subId"
-          $resp = Invoke-RestMethod -Headers $headers -Method Put -Uri $url -Body $body
-          if ($resp.status -ne "PendingCommit") { Write-Host "Submission status: $($resp.status)" }
-  
-      - name: Upload .msixupload to SAS URL
-        working-directory: sildarvinnsla/hmi
-        shell: powershell
-        run: |
-          $uploadUrl = "${{ steps.create.outputs.file_upload_url }}"
-          $filePath  = "${{ steps.pkg.outputs.msixupload }}"
-          if (-not (Test-Path $filePath)) { throw "Missing package file: $filePath" }
-          # Azure Blob PUT with required header
-          Invoke-WebRequest -Uri $uploadUrl -Method Put -InFile $filePath -Headers @{ "x-ms-blob-type"="BlockBlob" }
-
-      - name: Commit submission
-        working-directory: sildarvinnsla/hmi
-        shell: powershell
-        run: |
-          $headers = @{ Authorization = "Bearer ${{ steps.token.outputs.access_token }}" }
-          $appId = "${{ secrets.STORE_PRODUCT_ID }}"
-          $subId = "${{ steps.create.outputs.submission_id }}"
-          $commitUrl = "https://manage.devcenter.microsoft.com/v1.0/my/applications/$appId/submissions/$subId/commit"
-          Invoke-RestMethod -Headers $headers -Method Post -Uri $commitUrl | Out-Null
-
-      - name: Poll submission status
-        working-directory: sildarvinnsla/hmi
-        shell: powershell
-        run: |
-          $headers = @{ Authorization = "Bearer ${{ steps.token.outputs.access_token }}" }
-          $appId = "${{ secrets.STORE_PRODUCT_ID }}"
-          $subId = "${{ steps.create.outputs.submission_id }}"
-          $statusUrl = "https://manage.devcenter.microsoft.com/v1.0/my/applications/$appId/submissions/$subId/status"
-
-          for ($i=0; $i -lt 60; $i++) {
-            $st = Invoke-RestMethod -Headers $headers -Method Get -Uri $statusUrl
-            Write-Host "Status: $($st.status)"
-            if ($st.status -in @("CommitFailed","CertificationFailed","ReleaseFailed")) {
-              Write-Host "Errors:"; $st.statusDetails.errors | ConvertTo-Json -Depth 10
-              throw "Store submission failed: $($st.status)"
-            }
-            if ($st.status -in @("PreProcessing","Certification","Ingestion","Release","Completed")) {
-              # Success path. It may take time to reach Completed; we just exit once it's accepted (post-commit).
-              break
-            }
-            Start-Sleep -Seconds 30
-          }
-          if ($i -ge 60) { Write-Warning "Timed out waiting for final status (check Partner Center manually)." }
+          # Spin up a new submission, replace previous packages, upload & commit
+          $sub = New-ApplicationSubmission -AppId $env:STORE_APP_ID -Force
+          ($sub.applicationPackages) | ForEach-Object { $_.fileStatus = "PendingDelete" }
+          $pkg = Get-Content .\out\package.json -Raw | ConvertFrom-Json
+          $sub.applicationPackages += $pkg.applicationPackages
+          Set-ApplicationSubmission -AppId $env:STORE_APP_ID -UpdatedSubmission $sub
+          Set-SubmissionPackage -PackagePath .\out\package.zip -UploadUrl $sub.fileUploadUrl
+          Complete-ApplicationSubmission -AppId $env:STORE_APP_ID -SubmissionId $sub.id
 
