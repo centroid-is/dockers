@@ -11,21 +11,24 @@ jobs:
   publish:
     runs-on: windows-latest
     env:
-      STORE_APP_ID:      ${{ secrets.STORE_PRODUCT_ID }}     # Your app's AppId
-      STORE_TENANT_ID:   ${{ secrets.STORE_TENANT_ID }}
-      STORE_CLIENT_ID:   ${{ secrets.STORE_CLIENT_ID }}
-      STORE_CLIENT_SECRET: ${{ secrets.STORE_CLIENT_SECRET }}
+      STORE_APP_ID:          ${{ secrets.STORE_PRODUCT_ID }}   # Your app's AppId / StoreId (e.g. 9N1C64WM15R1)
+      STORE_TENANT_ID:       ${{ secrets.STORE_TENANT_ID }}
+      STORE_CLIENT_ID:       ${{ secrets.STORE_CLIENT_ID }}
+      STORE_CLIENT_SECRET:   ${{ secrets.STORE_CLIENT_SECRET }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           repository: centroid-is/sildarvinnsla
           token: ${{ secrets.GH_PAT }}
           path: sildarvinnsla
           ref: master
 
-      - uses: subosito/flutter-action@v2
-        with: { channel: stable }
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
 
       - name: Build Windows
         working-directory: sildarvinnsla/hmi
@@ -34,7 +37,8 @@ jobs:
       - name: Create MSIX for Store
         working-directory: sildarvinnsla/hmi
         shell: powershell
-        run: dart run msix:create --store
+        run: |
+          dart run msix:create --store
 
       - name: Find built MSIX
         id: pkg
@@ -45,7 +49,7 @@ jobs:
           if (-not $msix) { throw "No .msix found" }
           "msix=$($msix.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Upload artifact (.msix)
+      - name: Upload artifact (.msix)  # optional, handy for debugging
         uses: actions/upload-artifact@v4
         with:
           name: sv.msix
@@ -55,29 +59,60 @@ jobs:
         working-directory: sildarvinnsla/hmi
         shell: powershell
         run: |
-          Install-Module StoreBroker -Scope CurrentUser -Force
+          $ErrorActionPreference = 'Stop'
 
-          # Auth once; StoreBroker handles tokens for you
+          # Harden PowerShellGet / PSGallery so Install-Module is non-interactive
+          try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
+          Set-PSRepository -Name 'PSGallery' -InstallationPolicy Trusted
+          Install-Module StoreBroker -Scope CurrentUser -Force
+          Import-Module StoreBroker
+
+          # Validate required secrets early
+          $required = 'STORE_APP_ID','STORE_TENANT_ID','STORE_CLIENT_ID','STORE_CLIENT_SECRET'
+          $missing  = $required | Where-Object { -not $env:$_ }
+          if ($missing) { throw "Missing required secrets: $($missing -join ', ')" }
+
+          # Authenticate once; StoreBroker handles token refresh
           $sec  = ConvertTo-SecureString $env:STORE_CLIENT_SECRET -AsPlainText -Force
           $cred = New-Object pscredential($env:STORE_CLIENT_ID, $sec)
           Set-StoreBrokerAuthentication -TenantId $env:STORE_TENANT_ID -Credential $cred
 
-          # Create (or reuse) a minimal submission config
-          if (-not (Test-Path "submission.json")) {
-            New-StoreBrokerConfigFile -Path submission.json -AppId $env:STORE_APP_ID
+          # Resolve paths explicitly to avoid empty/relative binding issues
+          $ConfigPath = Join-Path (Get-Location) 'submission.json'
+          $OutDir     = Join-Path (Get-Location) 'out'
+          $OutName    = 'package'
+          $MsixPath   = "${{ steps.pkg.outputs.msix }}"
+
+          if (-not (Test-Path $ConfigPath)) {
+            New-StoreBrokerConfigFile -Path $ConfigPath -AppId $env:STORE_APP_ID
           }
 
-          # Bundle the MSIX into a Store-ready package.zip + package.json
-          New-SubmissionPackage -ConfigPath .\submission.json `
-                                -AppxPath "${{ steps.pkg.outputs.msix }}" `
-                                -OutPath out -OutName package
+          # Produce package.zip + package.json from the MSIX
+          New-SubmissionPackage -ConfigPath $ConfigPath `
+                                -AppxPath   $MsixPath `
+                                -OutPath    $OutDir `
+                                -OutName    $OutName
 
-          # Spin up a new submission, replace previous packages, upload & commit
+          # Create a fresh submission
           $sub = New-ApplicationSubmission -AppId $env:STORE_APP_ID -Force
-          ($sub.applicationPackages) | ForEach-Object { $_.fileStatus = "PendingDelete" }
-          $pkg = Get-Content .\out\package.json -Raw | ConvertFrom-Json
+
+          # Upload the ZIP first (required so the service can reference the file)
+          $packageZip = Join-Path $OutDir "$OutName.zip"
+          Set-SubmissionPackage -PackagePath $packageZip -UploadUrl $sub.fileUploadUrl
+
+          # Replace package list with the newly generated ones
+          $sub.applicationPackages | ForEach-Object { $_.fileStatus = 'PendingDelete' }
+          $pkg = Get-Content (Join-Path $OutDir "$OutName.json") -Raw | ConvertFrom-Json
           $sub.applicationPackages += $pkg.applicationPackages
+
+          # Save updated submission and then commit
           Set-ApplicationSubmission -AppId $env:STORE_APP_ID -UpdatedSubmission $sub
-          Set-SubmissionPackage -PackagePath .\out\package.zip -UploadUrl $sub.fileUploadUrl
           Complete-ApplicationSubmission -AppId $env:STORE_APP_ID -SubmissionId $sub.id
 
+      - name: Upload submission artifacts  # optional, inspect what StoreBroker produced
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-out
+          path: sildarvinnsla/hmi/out
