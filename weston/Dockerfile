@@ -1,28 +1,20 @@
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
+ARG SEAT_GID=995
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends weston openssl libgl1-mesa-dri libgbm1 \
+    && apt-get install -y --no-install-recommends weston seatd openssl libgl1-mesa-dri libgbm1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Enable testing repo, update weston from testing, then disable testing repo
-RUN echo "deb http://deb.debian.org/debian testing main" \
-    > /etc/apt/sources.list.d/testing.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends -t testing weston \
-    && rm /etc/apt/sources.list.d/testing.list \
-    && apt-get update \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
 
 # Create default user 'centroid'
-RUN useradd -m -s /bin/bash centroid
+RUN useradd -m -s /bin/bash centroid \
+    && groupadd -g ${SEAT_GID} seat \
+    && usermod -aG seat,video,tty centroid
 
 # 3. Copy in your weston.ini
-#    ensure config dir exists and is owned by centroid
-RUN mkdir -p /home/centroid/.config \
-    && chown centroid:centroid /home/centroid/.config
+#    ensure config dir exists
+RUN mkdir -p /home/centroid/.config
 COPY weston.ini /home/centroid/.config/weston.ini
-RUN chown centroid:centroid /home/centroid/.config/weston.ini
 
 # Generate self-signed certs for VNC
 RUN mkdir -p /home/centroid/vnc/certs \
@@ -38,6 +30,8 @@ RUN mkdir -p /home/centroid/vnc/certs \
     -out /home/centroid/vnc/certs/tls.crt \
     && chown -R centroid:centroid /home/centroid/vnc \
     && apt-get purge -y --auto-remove openssl
+
+RUN chown -R centroid:centroid /home/centroid/
 
 # Switch to centroid and set working dir
 USER centroid
