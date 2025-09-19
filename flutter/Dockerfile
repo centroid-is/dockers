@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     zlib1g \
     libpng16-16 \
+    libglib2.0-0 \ 
+    libsecret-1-0 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m centroid
