@@ -20,7 +20,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpng16-16 \
     libglib2.0-0 \ 
     libsecret-1-0 \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
+
+# Hacks for amplify secure storage
+RUN ln -s /usr/lib/x86_64-linux-gnu/libgio-2.0.so.0 /usr/lib/x86_64-linux-gnu/libgio-2.0.so
+RUN ln -s /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0 /usr/lib/x86_64-linux-gnu/libglib-2.0.so
+RUN ln -s /usr/lib/x86_64-linux-gnu/libsecret-1.so.0 /usr/lib/x86_64-linux-gnu/libsecret-1.so
 
 RUN useradd -m centroid
 
