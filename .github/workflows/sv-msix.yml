@@ -25,6 +25,13 @@ jobs:
           path: sildarvinnsla
           ref: master
 
+      - name: Allow pub to access private Git deps
+        shell: pwsh
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          git config --global url."https://x-access-token:${env:GH_PAT}@github.com/centroid-is/".insteadOf "https://github.com/centroid-is/"
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
