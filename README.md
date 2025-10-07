@@ -18,11 +18,10 @@ docker run --rm -it -v ./tmp-session:/run/user/1000 -v ./pass:/run/secrets -e DB
 ```
 
 ```bash
-ls -alh root/.local/share/keyrings/
+ls -alh /home/centroid/.local/share/keyrings/
 total 16K
-drwx------ 2 root root 4.0K Oct  7 13:24 .
-drwx------ 3 root root 4.0K Oct  7 13:24 ..
--rw------- 1 root root  105 Oct  7 13:24 login.keyring
--rw------- 1 root root  207 Oct  7 13:24 user.keystore
+drwx------ 2 centroid centroid 4.0K Oct  7 13:24 .
+drwx------ 3 centroid centroid 4.0K Oct  7 13:24 ..
+-rw------- 1 centroid centroid  105 Oct  7 13:24 login.keyring
+-rw------- 1 centroid centroid  207 Oct  7 13:24 user.keystore
 ```
-
