@@ -30,10 +30,6 @@ jobs:
         working-directory: sildarvinnsla
         run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Setup elinux platform
-        working-directory: sildarvinnsla/hmi
-        run: flutter-elinux create --platforms=elinux .
-
       - name: Configure git credentials for private repos
         run: |
           git config --system url."https://${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
@@ -41,6 +37,10 @@ jobs:
           echo "https://${{ secrets.GH_PAT }}@github.com" | tee /root/.git-credentials
           chmod 600 /root/.git-credentials
 
+      - name: Setup elinux platform
+        working-directory: sildarvinnsla/hmi
+        run: flutter-elinux create --platforms=elinux .
+  
       - name: Get Flutter Packages
         working-directory: sildarvinnsla/hmi
         env:
