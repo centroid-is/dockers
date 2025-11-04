@@ -1,0 +1,79 @@
+/* Solarized Light Theme for Squeekboard
+ *
+ * Solarized color palette by Ethan Schoonover
+ * Light theme optimized for on-screen keyboard
+ */
+
+/* Main keyboard container/background */
+sq_view {
+    background-color: #fdf6e3;  /* base3 - light background */
+}
+
+/* Default key styling */
+sq_button {
+    background-color: #eee8d5;  /* base2 - key background */
+    color: #657b83;             /* base00 - text color */
+    border-color: #93a1a1;      /* base1 - border color */
+    border-style: solid;
+    border-radius: 4px;
+}
+
+/* Key pressed/active state */
+sq_button:active {
+    background-color: #93a1a1;  /* base1 - pressed state */
+    color: #002b36;             /* base03 - dark text when pressed */
+    border-color: #586e75;      /* base01 - highlighted border */
+}
+
+/* Special keys (Return, Backspace, Tab, etc.) */
+sq_button.special {
+    background-color: #268bd2;  /* blue accent */
+    color: #fdf6e3;             /* base3 - light text for contrast */
+    border-color: #2aa198;      /* cyan accent for border */
+}
+
+sq_button.special:active {
+    background-color: #2aa198;  /* cyan - pressed state for special */
+    color: #002b36;             /* base03 - dark text */
+}
+
+/* Alternative/function keys (Shift, Ctrl, Alt) */
+sq_button.altline {
+    background-color: #b58900;  /* yellow accent */
+    color: #002b36;             /* base03 - dark text for contrast */
+    border-color: #cb4b16;      /* orange accent */
+}
+
+sq_button.altline:active {
+    background-color: #cb4b16;  /* orange - pressed state */
+    color: #fdf6e3;             /* base3 - light text */
+}
+
+/* Locked state (toggled modifiers like Caps Lock, Ctrl when locked) */
+sq_button.locked {
+    background-color: #859900;  /* green - indicates locked/on state */
+    color: #fdf6e3;             /* base3 - light text */
+    border-color: #2aa198;      /* cyan accent */
+}
+
+/* Wide keys (spacebar, etc.) */
+sq_button.wide {
+    background-color: #eee8d5;  /* base2 - same as default keys */
+    color: #586e75;             /* base01 - slightly darker text */
+}
+
+sq_button.wide:active {
+    background-color: #93a1a1;  /* base1 */
+    color: #002b36;             /* base03 */
+}
+
+/* Specific key customizations using ID selectors */
+#Return {
+    background-color: #859900;  /* green - highlight return key */
+    color: #fdf6e3;             /* base3 - light text */
+}
+
+#Return:active {
+    background-color: #2aa198;  /* cyan - pressed state */
+    color: #002b36;             /* base03 - dark text */
+}

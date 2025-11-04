@@ -2,7 +2,9 @@ FROM debian:trixie-slim
 ARG SEAT_GID=995
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends weston seatd openssl libgl1-mesa-dri libgbm1 \
+    && apt-get install -y --no-install-recommends \
+       weston seatd openssl libgl1-mesa-dri libgbm1 \
+       maliit-keyboard  \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -15,6 +17,14 @@ RUN useradd -m -s /bin/bash centroid \
 #    ensure config dir exists
 RUN mkdir -p /home/centroid/.config
 COPY weston.ini /home/centroid/.config/weston.ini
+
+# 4. Copy Maliit Solarized themes
+RUN mkdir -p /home/centroid/.local/share/maliit/keyboard2/themes/solarized-dark
+RUN mkdir -p /home/centroid/.local/share/maliit/keyboard2/themes/solarized-light
+COPY maliit-theme-dark/main.ini /home/centroid/.local/share/maliit/keyboard2/themes/solarized-dark/main.ini
+COPY maliit-theme-dark/extended-keys.ini /home/centroid/.local/share/maliit/keyboard2/themes/solarized-dark/extended-keys.ini
+COPY maliit-theme-light/main.ini /home/centroid/.local/share/maliit/keyboard2/themes/solarized-light/main.ini
+COPY maliit-theme-light/extended-keys.ini /home/centroid/.local/share/maliit/keyboard2/themes/solarized-light/extended-keys.ini
 
 # Generate self-signed certs for VNC
 RUN mkdir -p /home/centroid/vnc/certs \

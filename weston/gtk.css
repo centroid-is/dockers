@@ -1,0 +1,12 @@
+/* GTK CSS Configuration for Squeekboard
+ *
+ * Solarized Theme Selector
+ *
+ * To switch themes, comment/uncomment one of the @import lines below:
+ */
+
+/* Active theme - Solarized Dark (default) */
+@import url("gtk-solarized-dark.css");
+
+/* Alternative theme - Solarized Light (uncomment to use) */
+/* @import url("gtk-solarized-light.css"); */
