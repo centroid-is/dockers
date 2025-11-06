@@ -5,18 +5,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        weston seatd openssl libgl1-mesa-dri libgbm1 \
        maliit-keyboard qtwayland5 \
-       patch \
     && rm -rf /var/lib/apt/lists/*
 
 # Patch Maliit keyboard QML to make it 70% width and centered
-COPY keyboard-width.patch /tmp/keyboard-width.patch
-RUN patch /usr/lib/x86_64-linux-gnu/maliit/keyboard2/qml/Keyboard.qml /tmp/keyboard-width.patch \
-    && rm /tmp/keyboard-width.patch
+RUN sed -i '/anchors.bottom: parent.bottom/a\        anchors.left: undefined' /usr/lib/x86_64-linux-gnu/maliit/keyboard2/qml/Keyboard.qml \
+    && sed -i '/width: parent.width/c\        width: parent.width * 0.7' /usr/lib/x86_64-linux-gnu/maliit/keyboard2/qml/Keyboard.qml \
+    && sed -i '/width: parent.width \* 0.7/a\        anchors.horizontalCenter: parent.horizontalCenter' /usr/lib/x86_64-linux-gnu/maliit/keyboard2/qml/Keyboard.qml
 
 # Patch Maliit device config to reduce keyboard height to 30%
-COPY device-height.patch /tmp/device-height.patch
-RUN patch /usr/share/maliit/keyboard2/devices/default.json /tmp/device-height.patch \
-    && rm /tmp/device-height.patch
+RUN sed -i 's/"keyboardHeightLandscape": 0.38/"keyboardHeightLandscape": 0.3/' /usr/share/maliit/keyboard2/devices/default.json
 
 # Create default user 'centroid'
 RUN useradd -m -s /bin/bash centroid \
