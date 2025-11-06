@@ -4,7 +4,7 @@ ARG SEAT_GID=995
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        weston seatd openssl libgl1-mesa-dri libgbm1 \
-       maliit-keyboard  \
+       maliit-keyboard qtwayland5 \
     && rm -rf /var/lib/apt/lists/*
 
 
