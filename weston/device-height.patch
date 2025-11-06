@@ -1,0 +1,8 @@
+--- /usr/share/maliit/keyboard2/devices/default.json.orig
++++ /usr/share/maliit/keyboard2/devices/default.json
+@@ -1,5 +1,5 @@
+ {
+-  "keyboardHeightLandscape": 0.38,
++  "keyboardHeightLandscape": 0.3,
+   "keyboardHeightPortrait": 0.5
+ }

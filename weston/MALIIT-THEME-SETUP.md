@@ -7,13 +7,17 @@ This Docker container includes Maliit keyboard with custom Solarized color theme
 - **Removed:** squeekboard (incompatible with Weston)
 - **Added:** Maliit keyboard framework with Solarized themes
 - **Updated:** weston.ini to use Maliit as the input method
+- **Patched:** Maliit Keyboard.qml to be 70% width and centered (not full-screen)
+- **Patched:** Maliit device config to set keyboard height to 30% (more compact)
 
 ## Files Structure
 
 ```
 weston/
-├── Dockerfile                          # Updated with Maliit packages
+├── Dockerfile                          # Updated with Maliit packages + patches
 ├── weston.ini                          # Configured for Maliit
+├── keyboard-width.patch                # Patch to make keyboard 70% width & centered
+├── device-height.patch                 # Patch to set keyboard height to 30%
 ├── maliit-theme-dark/                  # Solarized Dark theme
 │   ├── main.ini
 │   └── extended-keys.ini
@@ -118,12 +122,35 @@ Example startup command would include setting up D-Bus before launching Weston.
 - Start D-Bus session: `dbus-launch --sh-syntax`
 - Export the session bus address before starting Weston
 
+## Keyboard Size Customization
+
+### Width
+The keyboard is patched during Docker build to be **70% of screen width** and **centered**.
+
+To adjust the width percentage, edit `keyboard-width.patch` and change:
+```qml
+width: parent.width * 0.7
+```
+
+To a different value (e.g., `0.6` for 60%, `0.8` for 80%), then rebuild the container.
+
+### Height
+The keyboard height is set to **30% of screen height** in landscape mode.
+
+To adjust the height percentage, edit `device-height.patch` and change:
+```json
+"keyboardHeightLandscape": 0.3,
+```
+
+To a different value (e.g., `0.25` for 25%, `0.35` for 35%), then rebuild the container.
+
 ## Notes
 
 - Maliit uses Qt/QML rendering, not GTK CSS
 - The old gtk.css, gtk-solarized-dark.css, and gtk-solarized-light.css files are no longer used
 - Themes are configured via INI files following Maliit's theme format
 - Some INI properties may not be supported depending on Maliit version
+- The keyboard width is controlled by patching the QML file at build time
 
 ## Compatibility
 

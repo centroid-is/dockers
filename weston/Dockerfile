@@ -5,8 +5,18 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        weston seatd openssl libgl1-mesa-dri libgbm1 \
        maliit-keyboard qtwayland5 \
+       patch \
     && rm -rf /var/lib/apt/lists/*
 
+# Patch Maliit keyboard QML to make it 70% width and centered
+COPY keyboard-width.patch /tmp/keyboard-width.patch
+RUN patch /usr/lib/x86_64-linux-gnu/maliit/keyboard2/qml/Keyboard.qml /tmp/keyboard-width.patch \
+    && rm /tmp/keyboard-width.patch
+
+# Patch Maliit device config to reduce keyboard height to 30%
+COPY device-height.patch /tmp/device-height.patch
+RUN patch /usr/share/maliit/keyboard2/devices/default.json /tmp/device-height.patch \
+    && rm /tmp/device-height.patch
 
 # Create default user 'centroid'
 RUN useradd -m -s /bin/bash centroid \
@@ -25,6 +35,11 @@ COPY maliit-theme-dark/main.ini /home/centroid/.local/share/maliit/keyboard2/the
 COPY maliit-theme-dark/extended-keys.ini /home/centroid/.local/share/maliit/keyboard2/themes/solarized-dark/extended-keys.ini
 COPY maliit-theme-light/main.ini /home/centroid/.local/share/maliit/keyboard2/themes/solarized-light/main.ini
 COPY maliit-theme-light/extended-keys.ini /home/centroid/.local/share/maliit/keyboard2/themes/solarized-light/extended-keys.ini
+
+# 5. Set default theme to solarized-dark using dconf
+RUN mkdir -p /home/centroid/.config/dconf \
+    && echo "[org/maliit/keyboard/maliit]" > /home/centroid/.config/dconf/user.txt \
+    && echo "theme='solarized-dark'" >> /home/centroid/.config/dconf/user.txt
 
 # Generate self-signed certs for VNC
 RUN mkdir -p /home/centroid/vnc/certs \
