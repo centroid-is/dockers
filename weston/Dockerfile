@@ -8,7 +8,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Patch Maliit keyboard QML to make it 70% width and centered
-RUN sed -i '/anchors.bottom: parent.bottom/a\        anchors.left: undefined' /usr/lib/x86_64-linux-gnu/maliit/keyboard2/qml/Keyboard.qml \
+RUN sed -i 's/anchors.left: parent.left/anchors.left: undefined/' /usr/lib/x86_64-linux-gnu/maliit/keyboard2/qml/Keyboard.qml \
     && sed -i '/width: parent.width/c\        width: parent.width * 0.7' /usr/lib/x86_64-linux-gnu/maliit/keyboard2/qml/Keyboard.qml \
     && sed -i '/width: parent.width \* 0.7/a\        anchors.horizontalCenter: parent.horizontalCenter' /usr/lib/x86_64-linux-gnu/maliit/keyboard2/qml/Keyboard.qml
 
