@@ -7,13 +7,11 @@ RUN apt-get update \
        maliit-keyboard qtwayland5 \
     && rm -rf /var/lib/apt/lists/*
 
-# Patch Maliit keyboard QML to make it 70% width and centered
-RUN sed -i 's/anchors.left: parent.left/anchors.left: undefined/' /usr/lib/x86_64-linux-gnu/maliit/keyboard2/qml/Keyboard.qml \
-    && sed -i '/width: parent.width/c\        width: parent.width * 0.7' /usr/lib/x86_64-linux-gnu/maliit/keyboard2/qml/Keyboard.qml \
-    && sed -i '/width: parent.width \* 0.7/a\        anchors.horizontalCenter: parent.horizontalCenter' /usr/lib/x86_64-linux-gnu/maliit/keyboard2/qml/Keyboard.qml
+# Custom Maliit keyboard QML to make it 70% width and centered
+COPY Keyboard.qml /usr/lib/x86_64-linux-gnu/maliit/keyboard2/qml/Keyboard.qml
 
-# Patch Maliit device config to reduce keyboard height to 30%
-RUN sed -i 's/"keyboardHeightLandscape": 0.38/"keyboardHeightLandscape": 0.3/' /usr/share/maliit/keyboard2/devices/default.json
+# Custom Maliit device config to reduce keyboard height to 30%
+COPY default.json /usr/share/maliit/keyboard2/devices/default.json
 
 # Create default user 'centroid'
 RUN useradd -m -s /bin/bash centroid \
