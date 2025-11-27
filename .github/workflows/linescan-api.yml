@@ -1,4 +1,4 @@
-name: Make linescan docker
+name: Make linescan-api docker
 
 on:
   workflow_dispatch:  # Manual trigger
