@@ -1,0 +1,64 @@
+name: Make linescan-api docker
+
+on:
+  workflow_dispatch:  # Manual trigger
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  publish-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout linescan-api-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: centroid-is/linescan-api-go
+          token: ${{ secrets.GH_PAT }}
+          path: linescan-api-go
+          ref: main
+
+      - name: Set up Go toolchain
+        uses: actions/setup-go@v4
+
+      - name: Get version from go.mod
+        id: go_version
+        working-directory: linescan-api-go
+        run: |
+          # Extract the version from go.mod (expects a line like: module linescan-api-go)
+          VERSION=$(sed -n 's/^module\s*=\s*"\(.*\)"/\1/p' go.mod | head -n1)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Found go.mod version: $VERSION"
+
+      - name: Build artifact
+        working-directory: linescan-api-go
+        run: |
+          go build -o linescan-api-go main.go
+
+      - name: Prepare Docker build context
+        working-directory: linescan-api-go
+        run: |
+          # Create a Dockerfile that copies the built binary into an Alpine-based image.
+          # Adjust the binary name if it differs from 'linescan-api-go'
+          cat <<'EOF' > Dockerfile
+          FROM alpine:latest
+          COPY linescan-api-go /usr/local/bin/linescan-api-go
+          RUN chmod +x /usr/local/bin/linescan-api-go
+          ENTRYPOINT ["/usr/local/bin/linescan-api-go"]
+          EOF
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: linescan-api-go
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/linescan-api-go:${{ steps.go_version.outputs.version }},ghcr.io/${{ github.repository_owner }}/linescan-api-go:latest
