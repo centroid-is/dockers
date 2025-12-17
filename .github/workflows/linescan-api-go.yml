@@ -10,8 +10,6 @@ permissions:
 jobs:
   publish-docker:
     runs-on: ubuntu-latest
-    container:
-      image: archlinux:latest
     steps:
       - name: Checkout linescan-api-go repository
         uses: actions/checkout@v4
@@ -20,37 +18,6 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           path: linescan-api-go
           ref: main
-
-      - name: install dependencies
-        run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm \
-            base-devel \
-            opencv \
-            pkg-config \
-            git \
-            go \
-            docker
-          pkg-config --modversion opencv4
-
-      - name: Build artifact
-        working-directory: linescan-api-go
-        run: |
-          go build -o linescan-api-go .
-
-      - name: Prepare Docker build context
-        working-directory: linescan-api-go
-        run: |
-          # Create a Dockerfile that copies the built binary into an Alpine-based image.
-          # Adjust the binary name if it differs from 'linescan-api-go'
-          cat <<'EOF' > Dockerfile
-          FROM alpine:latest
-          COPY linescan-api-go /usr/local/bin/linescan-api-go
-          RUN chmod +x /usr/local/bin/linescan-api-go
-          RUN apk update
-          RUN apk add opencv
-          ENTRYPOINT ["/usr/local/bin/linescan-api-go"]
-          EOF
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v2
