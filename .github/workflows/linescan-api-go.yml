@@ -10,6 +10,8 @@ permissions:
 jobs:
   publish-docker:
     runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
     steps:
       - name: Checkout linescan-api-go repository
         uses: actions/checkout@v4
@@ -19,34 +21,22 @@ jobs:
           path: linescan-api-go
           ref: main
 
-      - name: Set up Go toolchain
-        uses: actions/setup-go@v4
-
-      # - name: Get version from go.mod
-      #   id: go_version
-      #   working-directory: linescan-api-go
-      #   run: |
-      #     # Extract the version from go.mod (expects a line like: module linescan-api-go)
-      #     VERSION=$(sed -n 's/^module\s*=\s*"\(.*\)"/\1/p' go.mod | head -n1)
-      #     echo "version=$VERSION" >> $GITHUB_OUTPUT
-      #     echo "Found go.mod version: $VERSION"
-
-      - name: install opencv dependencies
+      - name: install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libopencv-dev \
-            libopencv-contrib-dev \
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm \
+            base-devel \
+            opencv \
             pkg-config \
-            build-essential
-          pkg-config --modversion opencv4 || pkg-config --modversion opencv
+            git \
+            go \
+            docker
+          pkg-config --modversion opencv4
 
       - name: Build artifact
         working-directory: linescan-api-go
-        env:
-          CGO_ENABLED: 1
         run: |
-          go build -o linescan-api-go main.go
+          go build -o linescan-api-go .
 
       - name: Prepare Docker build context
         working-directory: linescan-api-go
