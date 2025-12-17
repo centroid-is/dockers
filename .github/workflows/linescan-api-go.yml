@@ -22,14 +22,19 @@ jobs:
       - name: Set up Go toolchain
         uses: actions/setup-go@v4
 
-      - name: Get version from go.mod
-        id: go_version
-        working-directory: linescan-api-go
+      # - name: Get version from go.mod
+      #   id: go_version
+      #   working-directory: linescan-api-go
+      #   run: |
+      #     # Extract the version from go.mod (expects a line like: module linescan-api-go)
+      #     VERSION=$(sed -n 's/^module\s*=\s*"\(.*\)"/\1/p' go.mod | head -n1)
+      #     echo "version=$VERSION" >> $GITHUB_OUTPUT
+      #     echo "Found go.mod version: $VERSION"
+
+      - name: install opencv dependencies
         run: |
-          # Extract the version from go.mod (expects a line like: module linescan-api-go)
-          VERSION=$(sed -n 's/^module\s*=\s*"\(.*\)"/\1/p' go.mod | head -n1)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Found go.mod version: $VERSION"
+          sudo apt-get update
+          sudo apt-get install -y libopencv-dev
 
       - name: Build artifact
         working-directory: linescan-api-go
@@ -45,6 +50,8 @@ jobs:
           FROM alpine:latest
           COPY linescan-api-go /usr/local/bin/linescan-api-go
           RUN chmod +x /usr/local/bin/linescan-api-go
+          RUN apk update
+          RUN apk add opencv
           ENTRYPOINT ["/usr/local/bin/linescan-api-go"]
           EOF
 
@@ -60,5 +67,6 @@ jobs:
         with:
           context: linescan-api-go
           push: true
+          #ghcr.io/${{ github.repository_owner }}/linescan-api-go:${{ steps.go_version.outputs.version }},ghcr.io/${{ github.repository_owner }}/linescan-api-go:latest
           tags: |
-            ghcr.io/${{ github.repository_owner }}/linescan-api-go:${{ steps.go_version.outputs.version }},ghcr.io/${{ github.repository_owner }}/linescan-api-go:latest
+            ghcr.io/${{ github.repository_owner }}/linescan-api-go:latest
