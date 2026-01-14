@@ -1,0 +1,35 @@
+name: Make denholm flowscale integration docker
+
+on:
+  workflow_dispatch:  # Manual trigger
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  publish-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout blossom repository
+        uses: actions/checkout@v6
+        with:
+          repository: centroid-is/blossom
+          token: ${{ secrets.GH_PAT }}
+          path: blossom
+          ref: main
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: blossom/denholm-flow-scale-integration
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/denholm-flow-scale-integration:latest
