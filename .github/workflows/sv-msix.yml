@@ -39,7 +39,7 @@ jobs:
 
       - name: Build Windows
         working-directory: sildarvinnsla/hmi
-        run: flutter build windows --release
+        run: flutter build windows --release --verbose
 
       - name: Create MSIX for Store
         working-directory: sildarvinnsla/hmi
