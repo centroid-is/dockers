@@ -1,4 +1,4 @@
-name: Make linescan-api docker
+name: Build photos-api
 
 on:
   workflow_dispatch:  # Manual trigger
@@ -11,12 +11,12 @@ jobs:
   publish-docker:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout linescan-api-go repository
+      - name: Checkout photos-api repository
         uses: actions/checkout@v4
         with:
-          repository: centroid-is/linescan-api-go
+          repository: centroid-is/photos-api
           token: ${{ secrets.GH_PAT }}
-          path: linescan-api-go
+          path: photos-api
           ref: main
 
       - name: Log in to GitHub Container Registry
@@ -29,8 +29,8 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
         with:
-          context: linescan-api-go
+          context: photos-api
           push: true
-          #ghcr.io/${{ github.repository_owner }}/linescan-api-go:${{ steps.go_version.outputs.version }},ghcr.io/${{ github.repository_owner }}/linescan-api-go:latest
+          #ghcr.io/${{ github.repository_owner }}/photos-api:${{ steps.go_version.outputs.version }},ghcr.io/${{ github.repository_owner }}/photos-api:latest
           tags: |
-            ghcr.io/${{ github.repository_owner }}/linescan-api-go:latest
+            ghcr.io/${{ github.repository_owner }}/photos-api:latest
