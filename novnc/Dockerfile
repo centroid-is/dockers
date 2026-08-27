@@ -18,7 +18,7 @@ RUN apt-get update \
        https://github.com/novnc/noVNC /opt/novnc \
     && rm -rf /opt/novnc/.git
 
-COPY defaults.json index.html vnc.html /opt/novnc/
+COPY defaults.json mandatory.json index.html vnc.html /opt/novnc/
 COPY redirect.py /usr/local/bin/redirect.py
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
