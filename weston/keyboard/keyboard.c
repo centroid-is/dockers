@@ -128,6 +128,11 @@ struct layout {
 	 * layouts (weston keeps the initial input-panel surface size) */
 	double row_h;
 
+	/* horizontal inset of the visible sheet; the strip outside it is
+	 * drawn fully transparent (used to make the numpad look narrow
+	 * while the panel surface keeps the shared footprint) */
+	double sheet_inset;
+
 	const char *language;
 	uint32_t text_direction;
 };
@@ -225,6 +230,7 @@ static const struct layout normal_layout = {
 	4,
 	36,
 	50,
+	0,
 	"en",
 	ZWP_TEXT_INPUT_V1_TEXT_DIRECTION_LTR
 };
@@ -236,6 +242,7 @@ static const struct layout numeric_layout = {
 	4,
 	60,
 	50,
+	112,
 	"en",
 	ZWP_TEXT_INPUT_V1_TEXT_DIRECTION_LTR
 };
@@ -545,11 +552,32 @@ redraw_handler(struct widget *widget, void *data)
 	cairo_translate(cr, allocation.x, allocation.y);
 
 	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-	cairo_set_source_rgb(cr, COL(color_sheet));
-	cairo_rectangle(cr, 0, 0,
-			layout->columns * layout->unit,
-			layout->rows * layout->row_h);
-	cairo_paint(cr);
+	if (layout->sheet_inset > 0) {
+		double w = layout->columns * layout->unit;
+		double h = layout->rows * layout->row_h;
+		double r = 12;
+		double x = layout->sheet_inset;
+
+		cairo_set_source_rgba(cr, 0, 0, 0, 0);
+		cairo_rectangle(cr, 0, 0, w, h);
+		cairo_fill(cr);
+
+		/* sheet with rounded top corners, flush at the bottom */
+		cairo_set_source_rgb(cr, COL(color_sheet));
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, w - x - r, r, r, -M_PI / 2, 0);
+		cairo_line_to(cr, w - x, h);
+		cairo_line_to(cr, x, h);
+		cairo_arc(cr, x + r, r, r, M_PI, 3 * M_PI / 2);
+		cairo_close_path(cr);
+		cairo_fill(cr);
+	} else {
+		cairo_set_source_rgb(cr, COL(color_sheet));
+		cairo_rectangle(cr, 0, 0,
+				layout->columns * layout->unit,
+				layout->rows * layout->row_h);
+		cairo_paint(cr);
+	}
 
 	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 
