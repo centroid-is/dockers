@@ -5,6 +5,10 @@ name: Build and Push Weston Docker Image
 on:
   workflow_dispatch:  # Allows manual trigger
   push:
+    # main only — a feature branch must never republish :latest, which
+    # every station's watchtower pulls within the minute.
+    branches:
+      - main
     paths:
       - 'weston/**'
       - '.github/workflows/weston.yml'
