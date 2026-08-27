@@ -107,6 +107,9 @@ struct layout {
 
 	/* pixel width of one grid unit */
 	double unit;
+	/* pixel height of one row; rows * row_h must be equal for all
+	 * layouts (weston keeps the initial input-panel surface size) */
+	double row_h;
 
 	const char *language;
 	uint32_t text_direction;
@@ -114,41 +117,53 @@ struct layout {
 
 /*
  * Alpha layout: 20 grid units of 36 px -> 720 px wide, the stock
- * footprint. Letter keys are 2 units; the home row is staggered with
- * 1-unit spacers like Gboard.
+ * footprint, plus a dedicated number row on top (5 rows of 50 px).
+ * Letter keys are 2 units; the home row is staggered with 1-unit
+ * spacers like Gboard. The number row shows digits in every state.
  */
 static const struct key normal_keys[] = {
-	{ keytype_default, "q", "Q", "1", 2},
-	{ keytype_default, "w", "W", "2", 2},
-	{ keytype_default, "e", "E", "3", 2},
-	{ keytype_default, "r", "R", "4", 2},
-	{ keytype_default, "t", "T", "5", 2},
-	{ keytype_default, "y", "Y", "6", 2},
-	{ keytype_default, "u", "U", "7", 2},
-	{ keytype_default, "i", "I", "8", 2},
-	{ keytype_default, "o", "O", "9", 2},
-	{ keytype_default, "p", "P", "0", 2},
+	{ keytype_default, "1", "1", "1", 2},
+	{ keytype_default, "2", "2", "2", 2},
+	{ keytype_default, "3", "3", "3", 2},
+	{ keytype_default, "4", "4", "4", 2},
+	{ keytype_default, "5", "5", "5", 2},
+	{ keytype_default, "6", "6", "6", 2},
+	{ keytype_default, "7", "7", "7", 2},
+	{ keytype_default, "8", "8", "8", 2},
+	{ keytype_default, "9", "9", "9", 2},
+	{ keytype_default, "0", "0", "0", 2},
+
+	{ keytype_default, "q", "Q", "@", 2},
+	{ keytype_default, "w", "W", "#", 2},
+	{ keytype_default, "e", "E", "$", 2},
+	{ keytype_default, "r", "R", "%", 2},
+	{ keytype_default, "t", "T", "&", 2},
+	{ keytype_default, "y", "Y", "*", 2},
+	{ keytype_default, "u", "U", "-", 2},
+	{ keytype_default, "i", "I", "+", 2},
+	{ keytype_default, "o", "O", "(", 2},
+	{ keytype_default, "p", "P", ")", 2},
 
 	{ keytype_spacer, "", "", "", 1},
-	{ keytype_default, "a", "A", "-", 2},
-	{ keytype_default, "s", "S", "/", 2},
-	{ keytype_default, "d", "D", ":", 2},
-	{ keytype_default, "f", "F", ";", 2},
-	{ keytype_default, "g", "G", "(", 2},
-	{ keytype_default, "h", "H", ")", 2},
-	{ keytype_default, "j", "J", "&", 2},
-	{ keytype_default, "k", "K", "@", 2},
-	{ keytype_default, "l", "L", "\"", 2},
+	{ keytype_default, "a", "A", "!", 2},
+	{ keytype_default, "s", "S", "\"", 2},
+	{ keytype_default, "d", "D", "'", 2},
+	{ keytype_default, "f", "F", ":", 2},
+	{ keytype_default, "g", "G", ";", 2},
+	{ keytype_default, "h", "H", "/", 2},
+	{ keytype_default, "j", "J", "?", 2},
+	{ keytype_default, "k", "K", "_", 2},
+	{ keytype_default, "l", "L", "=", 2},
 	{ keytype_spacer, "", "", "", 1},
 
 	{ keytype_switch, "", "", "", 3},
-	{ keytype_default, "z", "Z", "*", 2},
-	{ keytype_default, "x", "X", "'", 2},
-	{ keytype_default, "c", "C", "#", 2},
-	{ keytype_default, "v", "V", "!", 2},
-	{ keytype_default, "b", "B", "?", 2},
-	{ keytype_default, "n", "N", "+", 2},
-	{ keytype_default, "m", "M", "=", 2},
+	{ keytype_default, "z", "Z", "~", 2},
+	{ keytype_default, "x", "X", "^", 2},
+	{ keytype_default, "c", "C", "[", 2},
+	{ keytype_default, "v", "V", "]", 2},
+	{ keytype_default, "b", "B", "{", 2},
+	{ keytype_default, "n", "N", "}", 2},
+	{ keytype_default, "m", "M", "\\", 2},
 	{ keytype_backspace, "", "", "", 3},
 
 	{ keytype_symbols, "?123", "?123", "ABC", 3},
@@ -199,8 +214,9 @@ static const struct layout normal_layout = {
 	normal_keys,
 	sizeof(normal_keys) / sizeof(*normal_keys),
 	20,
-	4,
+	5,
 	36,
+	50,
 	"en",
 	ZWP_TEXT_INPUT_V1_TEXT_DIRECTION_LTR
 };
@@ -211,11 +227,10 @@ static const struct layout numeric_layout = {
 	12,
 	4,
 	60,
+	62.5,
 	"en",
 	ZWP_TEXT_INPUT_V1_TEXT_DIRECTION_LTR
 };
-
-static const double key_height = 50;
 
 /* Gboard-like palette */
 #define COL(hex) \
@@ -356,22 +371,22 @@ draw_key(struct keyboard *keyboard,
 	 unsigned int row,
 	 unsigned int col)
 {
+	const struct layout *layout =
+		get_current_layout(keyboard->keyboard);
 	const char *label;
 	cairo_text_extents_t extents;
 	cairo_font_extents_t font_extents;
-	double unit, x, y, w, h, cx, cy;
+	double x, y, w, h, cx, cy;
 	bool pressed, accent;
 	const double gap_x = 3.5, gap_y = 4.5, radius = 6;
 
 	if (key->key_type == keytype_spacer)
 		return;
 
-	unit = get_current_layout(keyboard->keyboard)->unit;
-
-	x = col * unit + gap_x;
-	y = row * key_height + gap_y;
-	w = key->width * unit - 2 * gap_x;
-	h = key_height - 2 * gap_y;
+	x = col * layout->unit + gap_x;
+	y = row * layout->row_h + gap_y;
+	w = key->width * layout->unit - 2 * gap_x;
+	h = layout->row_h - 2 * gap_y;
 	cx = x + w / 2;
 	cy = y + h / 2;
 
@@ -493,7 +508,7 @@ redraw_handler(struct widget *widget, void *data)
 	cairo_set_source_rgb(cr, COL(color_sheet));
 	cairo_rectangle(cr, 0, 0,
 			layout->columns * layout->unit,
-			layout->rows * key_height);
+			layout->rows * layout->row_h);
 	cairo_paint(cr);
 
 	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
@@ -613,7 +628,7 @@ lookup_key(const struct layout *layout, double x, double y)
 	int row, col;
 	unsigned int i;
 
-	row = (int)(y / key_height);
+	row = (int)(y / layout->row_h);
 	col = (int)(x / layout->unit) + row * layout->columns;
 	if (row < 0 || x < 0)
 		return NULL;
@@ -752,7 +767,7 @@ handle_commit_state(void *data,
 
 	window_schedule_resize(keyboard->keyboard->window,
 			       layout->columns * layout->unit,
-			       layout->rows * key_height);
+			       layout->rows * layout->row_h);
 
 	zwp_input_method_context_v1_language(context,
 					     keyboard->serial,
@@ -830,7 +845,7 @@ input_method_activate(void *data,
 
 	window_schedule_resize(keyboard->keyboard->window,
 			       layout->columns * layout->unit,
-			       layout->rows * key_height);
+			       layout->rows * layout->row_h);
 
 	zwp_input_method_context_v1_language(context,
 					     keyboard->serial,
@@ -943,7 +958,7 @@ keyboard_create(struct virtual_keyboard *virtual_keyboard)
 
 	window_schedule_resize(keyboard->window,
 			       layout->columns * layout->unit,
-			       layout->rows * key_height);
+			       layout->rows * layout->row_h);
 
 	display_set_output_configure_handler(virtual_keyboard->display,
 					     display_output_handler);
