@@ -26,12 +26,16 @@
 /*
  * CentroidX on-screen keyboard: a restyled fork of weston-keyboard.
  *
- * Same input-method-v1 / input-panel-v1 plumbing as the stock client, with:
- *  - Gboard-like visuals: opaque light sheet, rounded flat keys, staggered
- *    home row, accent-colored Enter, pressed-key highlight, drawn icons.
- *  - A real numeric keypad (with decimal point and minus) for
- *    digits/number content purposes.
- *  - Direct commit_string typing (no preedit), one-shot shift.
+ * Same input-method-v1 / input-panel-v1 plumbing as the stock client, with
+ * a Gboard-like look and feel:
+ *  - opaque light sheet, rounded flat keys, staggered home row,
+ *    accent-colored Enter, pressed-key highlight, cairo-drawn icons
+ *  - digit hints on the top row, long-press to type them
+ *  - backspace auto-repeat on hold
+ *  - one-shot shift, double-tap for caps lock
+ *  - a real numeric keypad (decimal point, minus, plus) for
+ *    digits/number content purposes
+ *  - direct commit_string typing (no preedit)
  */
 
 #include "config.h"
@@ -50,7 +54,15 @@
 #include "window.h"
 #include "input-method-unstable-v1-client-protocol.h"
 #include "text-input-unstable-v1-client-protocol.h"
+#include "shared/helpers.h"
 #include "shared/xalloc.h"
+
+/* long-press delay for digit hints, backspace repeat delay/rate */
+#define LONGPRESS_USEC (500 * 1000)
+#define REPEAT_DELAY_MSEC 500
+#define REPEAT_RATE_MSEC 60
+/* double-tap window for caps lock */
+#define CAPS_DOUBLE_TAP_MSEC 350
 
 struct keyboard;
 
@@ -82,20 +94,21 @@ enum key_type {
 	keytype_space,
 	keytype_switch,
 	keytype_symbols,
-	keytype_arrow_left,
-	keytype_arrow_right,
 	keytype_spacer
 };
 
 struct key {
 	enum key_type key_type;
 
-	char *label;
-	char *uppercase;
-	char *symbol;
+	const char *label;
+	const char *uppercase;
+	const char *symbol;
 
 	/* width in layout grid units */
 	unsigned int width;
+
+	/* small corner hint, typed via long-press (NULL for none) */
+	const char *hint;
 };
 
 struct layout {
@@ -116,56 +129,48 @@ struct layout {
 };
 
 /*
- * Alpha layout: 20 grid units of 36 px -> 720 px wide, the stock
- * footprint, plus a dedicated number row on top (5 rows of 50 px).
- * Letter keys are 2 units; the home row is staggered with 1-unit
- * spacers like Gboard. The number row shows digits in every state.
+ * Alpha layout: 20 grid units of 36 px -> 720 px wide, 4 rows of 50 px,
+ * the stock footprint. Letter keys are 2 units; the home row is
+ * staggered with 1-unit spacers like Gboard. The top row carries digit
+ * hints typed by long-press; the ?123 page has the digits full-size.
  */
 static const struct key normal_keys[] = {
-	{ keytype_default, "1", "1", "1", 2},
-	{ keytype_default, "2", "2", "2", 2},
-	{ keytype_default, "3", "3", "3", 2},
-	{ keytype_default, "4", "4", "4", 2},
-	{ keytype_default, "5", "5", "5", 2},
-	{ keytype_default, "6", "6", "6", 2},
-	{ keytype_default, "7", "7", "7", 2},
-	{ keytype_default, "8", "8", "8", 2},
-	{ keytype_default, "9", "9", "9", 2},
-	{ keytype_default, "0", "0", "0", 2},
-
-	{ keytype_default, "q", "Q", "@", 2},
-	{ keytype_default, "w", "W", "#", 2},
-	{ keytype_default, "e", "E", "$", 2},
-	{ keytype_default, "r", "R", "%", 2},
-	{ keytype_default, "t", "T", "&", 2},
-	{ keytype_default, "y", "Y", "*", 2},
-	{ keytype_default, "u", "U", "-", 2},
-	{ keytype_default, "i", "I", "+", 2},
-	{ keytype_default, "o", "O", "(", 2},
-	{ keytype_default, "p", "P", ")", 2},
+	{ keytype_default, "q", "Q", "1", 2, "1"},
+	{ keytype_default, "w", "W", "2", 2, "2"},
+	{ keytype_default, "e", "E", "3", 2, "3"},
+	{ keytype_default, "r", "R", "4", 2, "4"},
+	{ keytype_default, "t", "T", "5", 2, "5"},
+	{ keytype_default, "y", "Y", "6", 2, "6"},
+	{ keytype_default, "u", "U", "7", 2, "7"},
+	{ keytype_default, "i", "I", "8", 2, "8"},
+	{ keytype_default, "o", "O", "9", 2, "9"},
+	{ keytype_default, "p", "P", "0", 2, "0"},
 
 	{ keytype_spacer, "", "", "", 1},
-	{ keytype_default, "a", "A", "!", 2},
-	{ keytype_default, "s", "S", "\"", 2},
-	{ keytype_default, "d", "D", "'", 2},
-	{ keytype_default, "f", "F", ":", 2},
-	{ keytype_default, "g", "G", ";", 2},
-	{ keytype_default, "h", "H", "/", 2},
-	{ keytype_default, "j", "J", "?", 2},
-	{ keytype_default, "k", "K", "_", 2},
-	{ keytype_default, "l", "L", "=", 2},
+	{ keytype_default, "a", "A", "-", 2},
+	{ keytype_default, "s", "S", "/", 2},
+	{ keytype_default, "d", "D", ":", 2},
+	{ keytype_default, "f", "F", ";", 2},
+	{ keytype_default, "g", "G", "(", 2},
+	{ keytype_default, "h", "H", ")", 2},
+	{ keytype_default, "j", "J", "$", 2},
+	{ keytype_default, "k", "K", "&", 2},
+	{ keytype_default, "l", "L", "@", 2},
 	{ keytype_spacer, "", "", "", 1},
 
 	{ keytype_switch, "", "", "", 3},
-	{ keytype_default, "z", "Z", "~", 2},
-	{ keytype_default, "x", "X", "^", 2},
-	{ keytype_default, "c", "C", "[", 2},
-	{ keytype_default, "v", "V", "]", 2},
-	{ keytype_default, "b", "B", "{", 2},
-	{ keytype_default, "n", "N", "}", 2},
-	{ keytype_default, "m", "M", "\\", 2},
+	{ keytype_default, "z", "Z", "*", 2},
+	{ keytype_default, "x", "X", "\"", 2},
+	{ keytype_default, "c", "C", "'", 2},
+	{ keytype_default, "v", "V", "!", 2},
+	{ keytype_default, "b", "B", "?", 2},
+	{ keytype_default, "n", "N", "+", 2},
+	{ keytype_default, "m", "M", "=", 2},
 	{ keytype_backspace, "", "", "", 3},
 
+	/* TODO(languages): when Icelandic/Polish land, a globe key goes
+	 * between ?123 and the comma (where Gboard keeps its gear key)
+	 * and the space bar shrinks to 8 units to make room. */
 	{ keytype_symbols, "?123", "?123", "ABC", 3},
 	{ keytype_default, ",", ",", "_", 2},
 	{ keytype_space, "", "", "", 10},
@@ -175,11 +180,10 @@ static const struct key normal_keys[] = {
 
 /*
  * Numeric keypad: 12 grid units of 60 px -> 720 px wide, 4 rows — the
- * same panel footprint as the alpha layout, so the input panel surface
- * never needs to resize (weston keeps the initial panel size). The
- * keypad itself is 8 units, centered by 2-unit spacers on each side.
- * Phone-style digit order, backspace/minus/enter down the right,
- * decimal point next to 0.
+ * same panel footprint as the alpha layout. The keypad itself is 8
+ * units, centered by 2-unit spacers on each side. Phone-style digit
+ * order; backspace / minus / plus down the right; double-width 0,
+ * decimal point, Enter along the bottom.
  */
 static const struct key numeric_keys[] = {
 	{ keytype_spacer, "", "", "", 2},
@@ -214,7 +218,7 @@ static const struct layout normal_layout = {
 	normal_keys,
 	sizeof(normal_keys) / sizeof(*normal_keys),
 	20,
-	5,
+	4,
 	36,
 	50,
 	"en",
@@ -227,7 +231,7 @@ static const struct layout numeric_layout = {
 	12,
 	4,
 	60,
-	62.5,
+	50,
 	"en",
 	ZWP_TEXT_INPUT_V1_TEXT_DIRECTION_LTR
 };
@@ -246,10 +250,12 @@ static const uint32_t color_accent      = 0x1a73e8;
 static const uint32_t color_accent_down = 0x1765cc;
 static const uint32_t color_text        = 0x202124;
 static const uint32_t color_icon        = 0x3c4043;
+static const uint32_t color_hint        = 0x80868b;
 
 enum keyboard_state {
 	KEYBOARD_STATE_DEFAULT,
-	KEYBOARD_STATE_UPPERCASE,
+	KEYBOARD_STATE_UPPERCASE,	/* one-shot shift */
+	KEYBOARD_STATE_LOCKED,		/* caps lock */
 	KEYBOARD_STATE_SYMBOLS
 };
 
@@ -259,7 +265,15 @@ struct keyboard {
 	struct widget *widget;
 
 	enum keyboard_state state;
-	const struct key *pressed_key;
+
+	/* the key currently held down (commit happens on release) */
+	const struct key *held_key;
+	bool long_fired;
+	uint32_t held_time;
+	uint32_t last_shift_time;
+
+	struct toytimer longpress_timer;
+	struct toytimer repeat_timer;
 };
 
 static const struct layout *
@@ -273,6 +287,7 @@ label_from_key(struct keyboard *keyboard,
 	case KEYBOARD_STATE_DEFAULT:
 		return key->label;
 	case KEYBOARD_STATE_UPPERCASE:
+	case KEYBOARD_STATE_LOCKED:
 		return key->uppercase;
 	case KEYBOARD_STATE_SYMBOLS:
 		return key->symbol;
@@ -293,15 +308,15 @@ rounded_rect(cairo_t *cr, double x, double y, double w, double h, double r)
 }
 
 static void
-draw_icon_shift(cairo_t *cr, double cx, double cy, bool filled)
+draw_icon_shift(cairo_t *cr, double cx, double cy, bool filled, bool locked)
 {
 	/* upward arrow with a stem, ~22 px tall */
 	cairo_new_path(cr);
 	cairo_move_to(cr, cx, cy - 10);
 	cairo_line_to(cr, cx + 9, cy);
 	cairo_line_to(cr, cx + 4, cy);
-	cairo_line_to(cr, cx + 4, cy + 9);
-	cairo_line_to(cr, cx - 4, cy + 9);
+	cairo_line_to(cr, cx + 4, cy + 7);
+	cairo_line_to(cr, cx - 4, cy + 7);
 	cairo_line_to(cr, cx - 4, cy);
 	cairo_line_to(cr, cx - 9, cy);
 	cairo_close_path(cr);
@@ -309,6 +324,13 @@ draw_icon_shift(cairo_t *cr, double cx, double cy, bool filled)
 		cairo_fill(cr);
 	} else {
 		cairo_set_line_width(cr, 1.8);
+		cairo_stroke(cr);
+	}
+
+	if (locked) {
+		cairo_set_line_width(cr, 2.0);
+		cairo_move_to(cr, cx - 4, cy + 11);
+		cairo_line_to(cr, cx + 4, cy + 11);
 		cairo_stroke(cr);
 	}
 }
@@ -353,18 +375,6 @@ draw_icon_enter(cairo_t *cr, double cx, double cy)
 }
 
 static void
-draw_icon_arrow(cairo_t *cr, double cx, double cy, int dir)
-{
-	/* chevron; dir -1 = left, +1 = right */
-	cairo_set_line_width(cr, 2.0);
-	cairo_new_path(cr);
-	cairo_move_to(cr, cx + 4 * -dir, cy - 7);
-	cairo_line_to(cr, cx + 4 * dir, cy);
-	cairo_line_to(cr, cx + 4 * -dir, cy + 7);
-	cairo_stroke(cr);
-}
-
-static void
 draw_key(struct keyboard *keyboard,
 	 const struct key *key,
 	 cairo_t *cr,
@@ -390,7 +400,7 @@ draw_key(struct keyboard *keyboard,
 	cx = x + w / 2;
 	cy = y + h / 2;
 
-	pressed = keyboard->pressed_key == key;
+	pressed = keyboard->held_key == key;
 	accent = key->key_type == keytype_enter;
 
 	cairo_save(cr);
@@ -434,19 +444,15 @@ draw_key(struct keyboard *keyboard,
 	switch (key->key_type) {
 	case keytype_switch:
 		draw_icon_shift(cr, cx, cy,
-				keyboard->state == KEYBOARD_STATE_UPPERCASE);
+				keyboard->state == KEYBOARD_STATE_UPPERCASE ||
+				keyboard->state == KEYBOARD_STATE_LOCKED,
+				keyboard->state == KEYBOARD_STATE_LOCKED);
 		break;
 	case keytype_backspace:
 		draw_icon_backspace(cr, cx, cy);
 		break;
 	case keytype_enter:
 		draw_icon_enter(cr, cx, cy);
-		break;
-	case keytype_arrow_left:
-		draw_icon_arrow(cr, cx, cy, -1);
-		break;
-	case keytype_arrow_right:
-		draw_icon_arrow(cr, cx, cy, 1);
 		break;
 	case keytype_space:
 	case keytype_spacer:
@@ -461,6 +467,18 @@ draw_key(struct keyboard *keyboard,
 			      cy + font_extents.height / 2 -
 				      font_extents.descent);
 		cairo_show_text(cr, label);
+
+		/* digit hint in the top-right corner */
+		if (key->hint &&
+		    keyboard->state != KEYBOARD_STATE_SYMBOLS) {
+			cairo_set_source_rgb(cr, COL(color_hint));
+			cairo_set_font_size(cr, 11);
+			cairo_text_extents(cr, key->hint, &extents);
+			cairo_move_to(cr,
+				      x + w - extents.width - 7,
+				      y + 15);
+			cairo_show_text(cr, key->hint);
+		}
 		break;
 	}
 
@@ -535,6 +553,9 @@ resize_handler(struct widget *widget,
 static void
 commit_text(struct virtual_keyboard *keyboard, const char *text)
 {
+	if (!keyboard->context)
+		return;
+
 	zwp_input_method_context_v1_cursor_position(keyboard->context, 0, 0);
 	zwp_input_method_context_v1_commit_string(keyboard->context,
 						  keyboard->serial,
@@ -543,82 +564,138 @@ commit_text(struct virtual_keyboard *keyboard, const char *text)
 
 static void
 send_keysym(struct virtual_keyboard *keyboard, uint32_t time,
-	    xkb_keysym_t sym, uint32_t key_state, xkb_mod_mask_t mod_mask)
+	    xkb_keysym_t sym, uint32_t key_state)
 {
+	if (!keyboard->context)
+		return;
+
 	zwp_input_method_context_v1_keysym(keyboard->context,
 					   display_get_serial(keyboard->display),
-					   time, sym, key_state, mod_mask);
+					   time, sym, key_state, 0);
 }
 
 static void
-keyboard_handle_key(struct keyboard *keyboard, uint32_t time, const struct key *key, struct input *input, enum wl_pointer_button_state state)
+tap_keysym(struct virtual_keyboard *keyboard, uint32_t time, xkb_keysym_t sym)
 {
-	const char *label = label_from_key(keyboard, key);
-	xkb_mod_mask_t mod_mask = keyboard->state == KEYBOARD_STATE_DEFAULT ? 0 : keyboard->keyboard->keysym.shift_mask;
-	uint32_t key_state = (state == WL_POINTER_BUTTON_STATE_PRESSED) ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED;
+	send_keysym(keyboard, time, sym, WL_KEYBOARD_KEY_STATE_PRESSED);
+	send_keysym(keyboard, time, sym, WL_KEYBOARD_KEY_STATE_RELEASED);
+}
+
+static void
+longpress_handler(struct toytimer *tt)
+{
+	struct keyboard *keyboard =
+		container_of(tt, struct keyboard, longpress_timer);
+
+	if (!keyboard->held_key || !keyboard->held_key->hint)
+		return;
+
+	commit_text(keyboard->keyboard, keyboard->held_key->hint);
+	keyboard->long_fired = true;
+}
+
+static void
+repeat_handler(struct toytimer *tt)
+{
+	struct keyboard *keyboard =
+		container_of(tt, struct keyboard, repeat_timer);
+
+	tap_keysym(keyboard->keyboard, keyboard->held_time,
+		   XKB_KEY_BackSpace);
+}
+
+static void
+key_press(struct keyboard *keyboard, uint32_t time, const struct key *key)
+{
+	struct itimerspec its;
+
+	keyboard->held_key = key;
+	keyboard->long_fired = false;
+	keyboard->held_time = time;
 
 	switch (key->key_type) {
-		case keytype_default:
-			if (state != WL_POINTER_BUTTON_STATE_PRESSED)
-				break;
-
-			commit_text(keyboard->keyboard, label);
-
-			/* one-shot shift */
-			if (keyboard->state == KEYBOARD_STATE_UPPERCASE)
-				keyboard->state = KEYBOARD_STATE_DEFAULT;
-			break;
-		case keytype_backspace:
-			send_keysym(keyboard->keyboard, time,
-				    XKB_KEY_BackSpace, key_state, 0);
-			break;
-		case keytype_enter:
-			send_keysym(keyboard->keyboard, time,
-				    XKB_KEY_Return, key_state, mod_mask);
-			break;
-		case keytype_space:
-			if (state != WL_POINTER_BUTTON_STATE_PRESSED)
-				break;
-			commit_text(keyboard->keyboard, " ");
-			break;
-		case keytype_switch:
-			if (state != WL_POINTER_BUTTON_STATE_PRESSED)
-				break;
-			switch(keyboard->state) {
+	case keytype_default:
+		if (key->hint &&
+		    keyboard->state != KEYBOARD_STATE_SYMBOLS)
+			toytimer_arm_once_usec(&keyboard->longpress_timer,
+					       LONGPRESS_USEC);
+		break;
+	case keytype_backspace:
+		tap_keysym(keyboard->keyboard, time, XKB_KEY_BackSpace);
+		its.it_value.tv_sec = 0;
+		its.it_value.tv_nsec = REPEAT_DELAY_MSEC * 1000000L;
+		its.it_interval.tv_sec = 0;
+		its.it_interval.tv_nsec = REPEAT_RATE_MSEC * 1000000L;
+		toytimer_arm(&keyboard->repeat_timer, &its);
+		break;
+	case keytype_enter:
+		send_keysym(keyboard->keyboard, time, XKB_KEY_Return,
+			    WL_KEYBOARD_KEY_STATE_PRESSED);
+		break;
+	case keytype_switch:
+		if (keyboard->state == KEYBOARD_STATE_UPPERCASE &&
+		    time - keyboard->last_shift_time < CAPS_DOUBLE_TAP_MSEC) {
+			keyboard->state = KEYBOARD_STATE_LOCKED;
+		} else {
+			switch (keyboard->state) {
 			case KEYBOARD_STATE_DEFAULT:
+			case KEYBOARD_STATE_SYMBOLS:
 				keyboard->state = KEYBOARD_STATE_UPPERCASE;
 				break;
 			case KEYBOARD_STATE_UPPERCASE:
-				keyboard->state = KEYBOARD_STATE_DEFAULT;
-				break;
-			case KEYBOARD_STATE_SYMBOLS:
-				keyboard->state = KEYBOARD_STATE_DEFAULT;
-				break;
-			}
-			break;
-		case keytype_symbols:
-			if (state != WL_POINTER_BUTTON_STATE_PRESSED)
-				break;
-			switch(keyboard->state) {
-			case KEYBOARD_STATE_DEFAULT:
-			case KEYBOARD_STATE_UPPERCASE:
-				keyboard->state = KEYBOARD_STATE_SYMBOLS;
-				break;
-			case KEYBOARD_STATE_SYMBOLS:
+			case KEYBOARD_STATE_LOCKED:
 				keyboard->state = KEYBOARD_STATE_DEFAULT;
 				break;
 			}
+		}
+		keyboard->last_shift_time = time;
+		break;
+	case keytype_symbols:
+		keyboard->state =
+			keyboard->state == KEYBOARD_STATE_SYMBOLS ?
+			KEYBOARD_STATE_DEFAULT : KEYBOARD_STATE_SYMBOLS;
+		break;
+	case keytype_space:
+	case keytype_spacer:
+		break;
+	}
+}
+
+static void
+key_release(struct keyboard *keyboard, uint32_t time)
+{
+	const struct key *key = keyboard->held_key;
+
+	if (!key)
+		return;
+
+	keyboard->held_key = NULL;
+
+	switch (key->key_type) {
+	case keytype_default:
+		toytimer_disarm(&keyboard->longpress_timer);
+		if (keyboard->long_fired)
 			break;
-		case keytype_arrow_left:
-			send_keysym(keyboard->keyboard, time,
-				    XKB_KEY_Left, key_state, mod_mask);
-			break;
-		case keytype_arrow_right:
-			send_keysym(keyboard->keyboard, time,
-				    XKB_KEY_Right, key_state, mod_mask);
-			break;
-		case keytype_spacer:
-			break;
+
+		commit_text(keyboard->keyboard,
+			    label_from_key(keyboard, key));
+
+		/* one-shot shift; caps lock stays */
+		if (keyboard->state == KEYBOARD_STATE_UPPERCASE)
+			keyboard->state = KEYBOARD_STATE_DEFAULT;
+		break;
+	case keytype_space:
+		commit_text(keyboard->keyboard, " ");
+		break;
+	case keytype_backspace:
+		toytimer_disarm(&keyboard->repeat_timer);
+		break;
+	case keytype_enter:
+		send_keysym(keyboard->keyboard, time, XKB_KEY_Return,
+			    WL_KEYBOARD_KEY_STATE_RELEASED);
+		break;
+	default:
+		break;
 	}
 }
 
@@ -644,28 +721,28 @@ lookup_key(const struct layout *layout, double x, double y)
 
 static void
 handle_press(struct keyboard *keyboard, uint32_t time,
-	     struct input *input, float x, float y,
+	     float x, float y,
 	     enum wl_pointer_button_state state)
 {
 	struct rectangle allocation;
 	const struct layout *layout;
 	const struct key *key;
 
-	layout = get_current_layout(keyboard->keyboard);
+	if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+		layout = get_current_layout(keyboard->keyboard);
 
-	widget_get_allocation(keyboard->widget, &allocation);
-	x -= allocation.x;
-	y -= allocation.y;
+		widget_get_allocation(keyboard->widget, &allocation);
+		x -= allocation.x;
+		y -= allocation.y;
 
-	key = lookup_key(layout, x, y);
-
-	if (state == WL_POINTER_BUTTON_STATE_PRESSED)
-		keyboard->pressed_key = key;
-	else
-		keyboard->pressed_key = NULL;
-
-	if (key)
-		keyboard_handle_key(keyboard, time, key, input, state);
+		key = lookup_key(layout, x, y);
+		if (key && key->key_type != keytype_spacer)
+			key_press(keyboard, time, key);
+	} else {
+		/* the release always acts on the key that was pressed,
+		 * wherever the finger ended up */
+		key_release(keyboard, time);
+	}
 
 	widget_schedule_redraw(keyboard->widget);
 }
@@ -684,7 +761,7 @@ button_handler(struct widget *widget,
 	}
 
 	input_get_position(input, &x, &y);
-	handle_press(keyboard, time, input, x, y, state);
+	handle_press(keyboard, time, x, y, state);
 }
 
 static void
@@ -694,7 +771,7 @@ touch_down_handler(struct widget *widget, struct input *input,
 {
 	struct keyboard *keyboard = data;
 
-	handle_press(keyboard, time, input, x, y,
+	handle_press(keyboard, time, x, y,
 		     WL_POINTER_BUTTON_STATE_PRESSED);
 }
 
@@ -704,11 +781,8 @@ touch_up_handler(struct widget *widget, struct input *input,
 		 void *data)
 {
 	struct keyboard *keyboard = data;
-	float x, y;
 
-	input_get_touch(input, id, &x, &y);
-
-	handle_press(keyboard, time, input, x, y,
+	handle_press(keyboard, time, 0, 0,
 		     WL_POINTER_BUTTON_STATE_RELEASED);
 }
 
@@ -814,7 +888,9 @@ input_method_activate(void *data,
 	const struct layout *layout;
 
 	keyboard->keyboard->state = KEYBOARD_STATE_DEFAULT;
-	keyboard->keyboard->pressed_key = NULL;
+	keyboard->keyboard->held_key = NULL;
+	toytimer_disarm(&keyboard->keyboard->longpress_timer);
+	toytimer_disarm(&keyboard->keyboard->repeat_timer);
 
 	if (keyboard->context)
 		zwp_input_method_context_v1_destroy(keyboard->context);
@@ -866,6 +942,10 @@ input_method_deactivate(void *data,
 
 	if (!keyboard->context)
 		return;
+
+	toytimer_disarm(&keyboard->keyboard->longpress_timer);
+	toytimer_disarm(&keyboard->keyboard->repeat_timer);
+	keyboard->keyboard->held_key = NULL;
 
 	zwp_input_method_context_v1_destroy(keyboard->context);
 	keyboard->context = NULL;
@@ -940,6 +1020,11 @@ keyboard_create(struct virtual_keyboard *virtual_keyboard)
 	keyboard->window = window_create_custom(virtual_keyboard->display);
 	keyboard->widget = window_add_widget(keyboard->window, keyboard);
 
+	toytimer_init(&keyboard->longpress_timer, CLOCK_MONOTONIC,
+		      virtual_keyboard->display, longpress_handler);
+	toytimer_init(&keyboard->repeat_timer, CLOCK_MONOTONIC,
+		      virtual_keyboard->display, repeat_handler);
+
 	virtual_keyboard->ips =
 		zwp_input_panel_v1_get_input_panel_surface(virtual_keyboard->input_panel,
 							   window_get_wl_surface(keyboard->window));
@@ -975,6 +1060,9 @@ keyboard_destroy(struct virtual_keyboard *virtual_keyboard)
 
 	if (virtual_keyboard->input_method)
 		zwp_input_method_v1_destroy(virtual_keyboard->input_method);
+
+	toytimer_fini(&virtual_keyboard->keyboard->longpress_timer);
+	toytimer_fini(&virtual_keyboard->keyboard->repeat_timer);
 
 	widget_destroy(virtual_keyboard->keyboard->widget);
 	window_destroy(virtual_keyboard->keyboard->window);
