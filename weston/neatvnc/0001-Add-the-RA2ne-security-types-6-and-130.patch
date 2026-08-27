@@ -1,0 +1,237 @@
+From 0346dc1a8f4f265648c00fa385add56219d32a97 Mon Sep 17 00:00:00 2001
+From: Centroid <jon@centroid.is>
+Date: Thu, 27 Aug 2026 12:06:07 +0000
+Subject: [PATCH] Add the RA2ne security types (6 and 130)
+
+RA2ne is RA2 with the session cipher removed: the RSA handshake runs in
+full, and encryption stops after the credentials are exchanged, so
+SecurityResult and everything after it go out in the clear.
+
+The motivation is browser clients. noVNC implements RA2ne and nothing
+else from the RSA-AES family, because encrypting every framebuffer byte
+in JavaScript is expensive and it expects to be tunnelled over wss://.
+Without these types the only thing a browser and neatvnc can agree on is
+Apple DH, which is unauthenticated Diffie-Hellman -- the client cannot
+verify the server at all. RA2ne gives it the server's RSA public key to
+verify instead, at no cost to the session it was already going to run in
+the clear.
+
+The four hunks:
+
+  * rfb-proto.h, server.c: the two type numbers, offered only when
+    NVNC_AUTH_REQUIRE_ENCRYPTION is unset -- the same guard Apple DH
+    already sits behind, since these leave the session unencrypted.
+    They are listed ahead of Apple DH so that a client supporting both
+    picks the one that authenticates the server; clients take the first
+    type they recognise in the server's order.
+
+  * server.c, common.h: the existing RSA-AES cases now cover their "ne"
+    counterparts and record which was chosen. Everything up to the
+    credentials is identical, so the handshake code is shared verbatim.
+
+  * auth/rsa-aes.c: for the "ne" types, take the cipher off before
+    security_handshake_ok() writes SecurityResult.
+
+  * stream/rsa-aes.c, stream/tcp.c: the downgrade itself. tcp.c's vtable
+    is exported rather than duplicated so the stream is restored to
+    exactly what it started as, and stays correct if the vtable grows.
+
+    If anything is still buffered when the downgrade happens, the client
+    sent data before SecurityResult, which the protocol does not permit.
+    Those bytes are either ciphertext we can no longer decrypt or
+    plaintext the plain reader will never see, so the connection is
+    refused rather than guessing.
+---
+ include/common.h        |  3 +++
+ include/rfb-proto.h     |  2 ++
+ include/stream/stream.h |  1 +
+ include/stream/tcp.h    |  2 ++
+ src/auth/rsa-aes.c      |  8 ++++++++
+ src/server.c            | 13 +++++++++++++
+ src/stream/rsa-aes.c    | 31 +++++++++++++++++++++++++++++++
+ src/stream/tcp.c        |  4 ++--
+ 8 files changed, 62 insertions(+), 2 deletions(-)
+
+diff --git a/include/common.h b/include/common.h
+index e0b87c2..dd5f72d 100644
+--- a/include/common.h
++++ b/include/common.h
+@@ -144,6 +144,9 @@ struct nvnc_client {
+ 		size_t challenge_len;
+ 		uint8_t challenge[32];
+ 		struct crypto_rsa_pub_key* pub;
++		/* The "ne" security types run the same handshake, but leave
++		 * the session unencrypted from SecurityResult onwards. */
++		bool encrypt_session;
+ 	} rsa;
+ #endif
+ };
+diff --git a/include/rfb-proto.h b/include/rfb-proto.h
+index e492a66..742c565 100644
+--- a/include/rfb-proto.h
++++ b/include/rfb-proto.h
+@@ -30,10 +30,12 @@ enum rfb_security_type {
+ 	RFB_SECURITY_TYPE_NONE = 1,
+ 	RFB_SECURITY_TYPE_VNC_AUTH = 2,
+ 	RFB_SECURITY_TYPE_RSA_AES = 5,
++	RFB_SECURITY_TYPE_RSA_AES_NE = 6,
+ 	RFB_SECURITY_TYPE_TIGHT = 16,
+ 	RFB_SECURITY_TYPE_VENCRYPT = 19,
+ 	RFB_SECURITY_TYPE_APPLE_DH = 30,
+ 	RFB_SECURITY_TYPE_RSA_AES256 = 129,
++	RFB_SECURITY_TYPE_RSA_AES256_NE = 130,
+ };
+ 
+ enum rfb_security_handshake_result {
+diff --git a/include/stream/stream.h b/include/stream/stream.h
+index ce1caf8..992c123 100644
+--- a/include/stream/stream.h
++++ b/include/stream/stream.h
+@@ -119,6 +119,7 @@ int stream_upgrade_to_tls(struct stream* self, void* context);
+ #endif
+ 
+ #ifdef HAVE_CRYPTO
++int stream_downgrade_from_rsa_aes(struct stream* base);
+ int stream_upgrade_to_rsa_eas(struct stream* base,
+ 		enum crypto_cipher_type cipher_type,
+ 		const uint8_t* enc_key, const uint8_t* dec_key);
+diff --git a/include/stream/tcp.h b/include/stream/tcp.h
+index 22572c9..2833c72 100644
+--- a/include/stream/tcp.h
++++ b/include/stream/tcp.h
+@@ -22,6 +22,8 @@
+ 
+ struct stream;
+ 
++extern struct stream_impl stream_tcp_impl;
++
+ int stream_tcp_init(struct stream* self, int fd, stream_event_fn on_event,
+ 		void* userdata);
+ int stream_tcp_close(struct stream* self);
+diff --git a/src/auth/rsa-aes.c b/src/auth/rsa-aes.c
+index 66f10cb..ed02886 100644
+--- a/src/auth/rsa-aes.c
++++ b/src/auth/rsa-aes.c
+@@ -294,6 +294,14 @@ static int on_rsa_aes_credentials(struct nvnc_client* client)
+ 
+ 	update_min_rtt(client);
+ 
++	/* The "ne" types encrypt the handshake only, so SecurityResult and
++	 * everything after it go out in the clear. */
++	if (!client->rsa.encrypt_session &&
++			stream_downgrade_from_rsa_aes(client->net_stream) < 0) {
++		nvnc_client_close(client);
++		return 0;
++	}
++
+ 	if (server->auth_fn(username, password, server->auth_ud)) {
+ 		security_handshake_ok(client, username);
+ 		client->state = VNC_CLIENT_STATE_WAITING_FOR_INIT;
+diff --git a/src/server.c b/src/server.c
+index b94ed0d..86f82a4 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -277,6 +277,13 @@ static void init_security_types(struct nvnc* server)
+ 		ADD_SECURITY_TYPE(RFB_SECURITY_TYPE_RSA_AES);
+ 
+ 		if (!(server->auth_flags & NVNC_AUTH_REQUIRE_ENCRYPTION)) {
++			/* Listed ahead of Apple DH: these run the full RSA-AES
++			 * handshake, so the client can verify the server's key
++			 * rather than trusting an unauthenticated DH exchange.
++			 * Clients pick the first type they support. */
++			ADD_SECURITY_TYPE(RFB_SECURITY_TYPE_RSA_AES256_NE);
++			ADD_SECURITY_TYPE(RFB_SECURITY_TYPE_RSA_AES_NE);
++
+ 			ADD_SECURITY_TYPE(RFB_SECURITY_TYPE_APPLE_DH);
+ 		}
+ #endif
+@@ -380,16 +387,22 @@ static int on_security_message(struct nvnc_client* client)
+ 		client->state = VNC_CLIENT_STATE_WAITING_FOR_APPLE_DH_RESPONSE;
+ 		break;
+ 	case RFB_SECURITY_TYPE_RSA_AES:
++	case RFB_SECURITY_TYPE_RSA_AES_NE:
+ 		client->rsa.hash_type = CRYPTO_HASH_SHA1;
+ 		client->rsa.cipher_type = CRYPTO_CIPHER_AES_EAX;
+ 		client->rsa.challenge_len = 16;
++		client->rsa.encrypt_session =
++			type == RFB_SECURITY_TYPE_RSA_AES;
+ 		rsa_aes_send_public_key(client);
+ 		client->state = VNC_CLIENT_STATE_WAITING_FOR_RSA_AES_PUBLIC_KEY;
+ 		break;
+ 	case RFB_SECURITY_TYPE_RSA_AES256:
++	case RFB_SECURITY_TYPE_RSA_AES256_NE:
+ 		client->rsa.hash_type = CRYPTO_HASH_SHA256;
+ 		client->rsa.cipher_type = CRYPTO_CIPHER_AES256_EAX;
+ 		client->rsa.challenge_len = 32;
++		client->rsa.encrypt_session =
++			type == RFB_SECURITY_TYPE_RSA_AES256;
+ 		rsa_aes_send_public_key(client);
+ 		client->state = VNC_CLIENT_STATE_WAITING_FOR_RSA_AES_PUBLIC_KEY;
+ 		break;
+diff --git a/src/stream/rsa-aes.c b/src/stream/rsa-aes.c
+index 89cd1a2..4cdeba0 100644
+--- a/src/stream/rsa-aes.c
++++ b/src/stream/rsa-aes.c
+@@ -189,6 +189,37 @@ static struct stream_impl impl = {
+ 	.send = stream_rsa_aes_send,
+ };
+ 
++/* Revert an RSA-AES stream to plain TCP.
++ *
++ * The "ne" (no encryption) security types encrypt the handshake and nothing
++ * else, so the cipher has to come off before SecurityResult is written.
++ *
++ * Anything still sitting in the read buffer at this point is data the client
++ * sent before it was allowed to: the RFB protocol requires it to wait for
++ * SecurityResult. Rather than guess whether those bytes are ciphertext we can
++ * no longer decrypt or plaintext the plain reader will never see, refuse.
++ */
++int stream_downgrade_from_rsa_aes(struct stream* base)
++{
++	struct stream_rsa_aes* self = (struct stream_rsa_aes*)base;
++
++	if (self->read_index != 0) {
++		nvnc_log(NVNC_LOG_DEBUG,
++				"Client sent data before SecurityResult");
++		errno = EBADMSG;
++		return -1;
++	}
++
++	crypto_cipher_del(self->cipher);
++	self->cipher = NULL;
++
++	free(self->read_buffer);
++	self->read_buffer = NULL;
++
++	self->base.impl = &stream_tcp_impl;
++	return 0;
++}
++
+ int stream_upgrade_to_rsa_eas(struct stream* base,
+ 		enum crypto_cipher_type cipher_type,
+ 		const uint8_t* enc_key, const uint8_t* dec_key)
+diff --git a/src/stream/tcp.c b/src/stream/tcp.c
+index 53d8237..edcf36c 100644
+--- a/src/stream/tcp.c
++++ b/src/stream/tcp.c
+@@ -266,7 +266,7 @@ void stream_tcp_exec_and_send(struct stream* self,
+ 	stream_tcp__flush(self);
+ }
+ 
+-static struct stream_impl impl = {
++struct stream_impl stream_tcp_impl = {
+ 	.close = stream_tcp_close,
+ 	.destroy = stream_tcp_destroy,
+ 	.read = stream_tcp_read,
+@@ -278,7 +278,7 @@ static struct stream_impl impl = {
+ int stream_tcp_init(struct stream* self, int fd, stream_event_fn on_event,
+ 		void* userdata)
+ {
+-	self->impl = &impl,
++	self->impl = &stream_tcp_impl,
+ 	self->fd = fd;
+ 	self->on_event = on_event;
+ 	self->userdata = userdata;
+-- 
+2.39.5 (Apple Git-154)
+

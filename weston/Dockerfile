@@ -36,7 +36,39 @@ RUN cd /src/weston \
     && ninja -C build clients/weston-keyboard
 
 # =============================================================================
-# Stage 2: runtime
+# Stage 2: build neatvnc with the RA2ne security types
+#
+# Debian's neatvnc offers a browser client no security type it can use, so the
+# only overlap with noVNC is Apple DH — unauthenticated Diffie-Hellman. The
+# patch adds RA2ne (types 6 and 130), which hands the client the server's RSA
+# key to verify instead. See neatvnc/README.md.
+# =============================================================================
+FROM debian:trixie-slim AS neatvnc-builder
+
+ARG NEATVNC_VERSION=v0.9.1
+
+# As with the keyboard stage, build-dep on the distro package rather than
+# hand-listing -dev packages that drift between releases.
+RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get build-dep -y neatvnc \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --branch ${NEATVNC_VERSION} \
+    https://github.com/any1/neatvnc.git /src/neatvnc
+
+COPY neatvnc/*.patch /patches/
+
+RUN cd /src/neatvnc \
+    && git apply --check /patches/*.patch \
+    && git apply /patches/*.patch \
+    && meson setup build --buildtype=release -Dtls=enabled -Dnettle=enabled \
+    && ninja -C build
+
+
+# =============================================================================
+# Stage 3: runtime
 # =============================================================================
 FROM debian:trixie-slim
 ARG SEAT_GID=995
@@ -55,6 +87,16 @@ RUN useradd -m -s /bin/bash centroid \
 COPY --from=keyboard-builder /src/weston/build/clients/weston-keyboard \
      /usr/local/bin/centroidx-keyboard
 RUN chmod 755 /usr/local/bin/centroidx-keyboard
+
+# The patched libneatvnc, over Debian's copy. Weston itself is not rebuilt:
+# the patch adds no symbols and changes nothing that crosses the ABI.
+COPY --from=neatvnc-builder /src/neatvnc/build/libneatvnc.so.0 /tmp/libneatvnc.so.0
+RUN set -eux; \
+    target=$(ls /usr/lib/*/libneatvnc.so.0); \
+    test -f "$target"; \
+    cp /tmp/libneatvnc.so.0 "$target"; \
+    rm /tmp/libneatvnc.so.0; \
+    ldconfig
 
 # 3. Copy in your weston.ini
 #    ensure config dir exists
