@@ -886,8 +886,15 @@ input_method_activate(void *data,
 	struct virtual_keyboard *keyboard = data;
 	struct wl_array modifiers_map;
 	const struct layout *layout;
+	const char *start_state = getenv("WESTON_KEYBOARD_START_STATE");
 
-	keyboard->keyboard->state = KEYBOARD_STATE_DEFAULT;
+	/* debug hook so non-default states can be screenshotted headlessly */
+	if (start_state && !strcmp(start_state, "symbols"))
+		keyboard->keyboard->state = KEYBOARD_STATE_SYMBOLS;
+	else if (start_state && !strcmp(start_state, "uppercase"))
+		keyboard->keyboard->state = KEYBOARD_STATE_UPPERCASE;
+	else
+		keyboard->keyboard->state = KEYBOARD_STATE_DEFAULT;
 	keyboard->keyboard->held_key = NULL;
 	toytimer_disarm(&keyboard->keyboard->longpress_timer);
 	toytimer_disarm(&keyboard->keyboard->repeat_timer);
