@@ -63,6 +63,8 @@
 #define REPEAT_RATE_MSEC 60
 /* double-tap window for caps lock */
 #define CAPS_DOUBLE_TAP_MSEC 350
+/* corner radius of the panel sheet's top edges */
+#define SHEET_RADIUS 10
 
 struct keyboard;
 
@@ -529,18 +531,20 @@ redraw_handler(struct widget *widget, void *data)
 
 	cairo_translate(cr, allocation.x, allocation.y);
 
+	/* the sheet: rounded top corners, flush with the screen edge at the
+	 * bottom, and anything outside it (the numpad's side strips) left
+	 * fully transparent */
 	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-	if (layout->sheet_inset > 0) {
+	{
 		double w = layout->columns * layout->unit;
 		double h = layout->rows * layout->row_h;
-		double r = 12;
+		double r = SHEET_RADIUS;
 		double x = layout->sheet_inset;
 
 		cairo_set_source_rgba(cr, 0, 0, 0, 0);
 		cairo_rectangle(cr, 0, 0, w, h);
 		cairo_fill(cr);
 
-		/* sheet with rounded top corners, flush at the bottom */
 		cairo_set_source_rgb(cr, COL(color_sheet));
 		cairo_new_sub_path(cr);
 		cairo_arc(cr, w - x - r, r, r, -M_PI / 2, 0);
@@ -549,12 +553,6 @@ redraw_handler(struct widget *widget, void *data)
 		cairo_arc(cr, x + r, r, r, M_PI, 3 * M_PI / 2);
 		cairo_close_path(cr);
 		cairo_fill(cr);
-	} else {
-		cairo_set_source_rgb(cr, COL(color_sheet));
-		cairo_rectangle(cr, 0, 0,
-				layout->columns * layout->unit,
-				layout->rows * layout->row_h);
-		cairo_paint(cr);
 	}
 
 	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
