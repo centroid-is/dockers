@@ -185,14 +185,13 @@ static const struct key numeric_keys[] = {
 	{ keytype_default, "7", "7", "7", 2},
 	{ keytype_default, "8", "8", "8", 2},
 	{ keytype_default, "9", "9", "9", 2},
-	{ keytype_enter, "", "", "", 2},
+	{ keytype_default, "+", "+", "+", 2},
 	{ keytype_spacer, "", "", "", 2},
 
 	{ keytype_spacer, "", "", "", 2},
-	{ keytype_arrow_left, "", "", "", 2},
-	{ keytype_default, "0", "0", "0", 2},
+	{ keytype_default, "0", "0", "0", 4},
 	{ keytype_default, ".", ".", ".", 2},
-	{ keytype_arrow_right, "", "", "", 2},
+	{ keytype_enter, "", "", "", 2},
 	{ keytype_spacer, "", "", "", 2}
 };
 
