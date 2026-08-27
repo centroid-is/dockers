@@ -109,10 +109,6 @@ struct key {
 
 	/* small corner hint, typed via long-press (NULL for none) */
 	const char *hint;
-
-	/* character on the second symbols page (#+=); falls back to
-	 * symbol when NULL */
-	const char *symbol2;
 };
 
 struct layout {
@@ -144,37 +140,37 @@ struct layout {
  * hints typed by long-press; the ?123 page has the digits full-size.
  */
 static const struct key normal_keys[] = {
-	{ keytype_default, "q", "Q", "1", 2, "1", "~"},
-	{ keytype_default, "w", "W", "2", 2, "2", "`"},
-	{ keytype_default, "e", "E", "3", 2, "3", "|"},
-	{ keytype_default, "r", "R", "4", 2, "4", "•"},
-	{ keytype_default, "t", "T", "5", 2, "5", "√"},
-	{ keytype_default, "y", "Y", "6", 2, "6", "π"},
-	{ keytype_default, "u", "U", "7", 2, "7", "÷"},
-	{ keytype_default, "i", "I", "8", 2, "8", "×"},
-	{ keytype_default, "o", "O", "9", 2, "9", "¶"},
-	{ keytype_default, "p", "P", "0", 2, "0", "∆"},
+	{ keytype_default, "q", "Q", "1", 2, "1"},
+	{ keytype_default, "w", "W", "2", 2, "2"},
+	{ keytype_default, "e", "E", "3", 2, "3"},
+	{ keytype_default, "r", "R", "4", 2, "4"},
+	{ keytype_default, "t", "T", "5", 2, "5"},
+	{ keytype_default, "y", "Y", "6", 2, "6"},
+	{ keytype_default, "u", "U", "7", 2, "7"},
+	{ keytype_default, "i", "I", "8", 2, "8"},
+	{ keytype_default, "o", "O", "9", 2, "9"},
+	{ keytype_default, "p", "P", "0", 2, "0"},
 
 	{ keytype_spacer, "", "", "", 1},
-	{ keytype_default, "a", "A", "-", 2, NULL, "£"},
-	{ keytype_default, "s", "S", "/", 2, NULL, "¢"},
-	{ keytype_default, "d", "D", ":", 2, NULL, "€"},
-	{ keytype_default, "f", "F", ";", 2, NULL, "¥"},
-	{ keytype_default, "g", "G", "(", 2, NULL, "^"},
-	{ keytype_default, "h", "H", ")", 2, NULL, "°"},
-	{ keytype_default, "j", "J", "$", 2, NULL, "="},
-	{ keytype_default, "k", "K", "&", 2, NULL, "{"},
-	{ keytype_default, "l", "L", "@", 2, NULL, "}"},
+	{ keytype_default, "a", "A", "-", 2},
+	{ keytype_default, "s", "S", "/", 2},
+	{ keytype_default, "d", "D", ":", 2},
+	{ keytype_default, "f", "F", ";", 2},
+	{ keytype_default, "g", "G", "(", 2},
+	{ keytype_default, "h", "H", ")", 2},
+	{ keytype_default, "j", "J", "$", 2},
+	{ keytype_default, "k", "K", "&", 2},
+	{ keytype_default, "l", "L", "@", 2},
 	{ keytype_spacer, "", "", "", 1},
 
 	{ keytype_switch, "", "", "", 3},
-	{ keytype_default, "z", "Z", "*", 2, NULL, "\\"},
-	{ keytype_default, "x", "X", "\"", 2, NULL, "©"},
-	{ keytype_default, "c", "C", "'", 2, NULL, "®"},
-	{ keytype_default, "v", "V", "!", 2, NULL, "™"},
-	{ keytype_default, "b", "B", "?", 2, NULL, "℅"},
-	{ keytype_default, "n", "N", "+", 2, NULL, "["},
-	{ keytype_default, "m", "M", "=", 2, NULL, "]"},
+	{ keytype_default, "z", "Z", "*", 2},
+	{ keytype_default, "x", "X", "\"", 2},
+	{ keytype_default, "c", "C", "'", 2},
+	{ keytype_default, "v", "V", "!", 2},
+	{ keytype_default, "b", "B", "?", 2},
+	{ keytype_default, "n", "N", "+", 2},
+	{ keytype_default, "m", "M", "=", 2},
 	{ keytype_backspace, "", "", "", 3},
 
 	/* TODO(languages): when Icelandic/Polish land, a globe key goes
@@ -267,8 +263,7 @@ enum keyboard_state {
 	KEYBOARD_STATE_DEFAULT,
 	KEYBOARD_STATE_UPPERCASE,	/* one-shot shift */
 	KEYBOARD_STATE_LOCKED,		/* caps lock */
-	KEYBOARD_STATE_SYMBOLS,
-	KEYBOARD_STATE_SYMBOLS2
+	KEYBOARD_STATE_SYMBOLS
 };
 
 struct keyboard {
@@ -303,8 +298,6 @@ label_from_key(struct keyboard *keyboard,
 		return key->uppercase;
 	case KEYBOARD_STATE_SYMBOLS:
 		return key->symbol;
-	case KEYBOARD_STATE_SYMBOLS2:
-		return key->symbol2 ? key->symbol2 : key->symbol;
 	}
 
 	return "";
@@ -457,20 +450,6 @@ draw_key(struct keyboard *keyboard,
 
 	switch (key->key_type) {
 	case keytype_switch:
-		if (keyboard->state == KEYBOARD_STATE_SYMBOLS ||
-		    keyboard->state == KEYBOARD_STATE_SYMBOLS2) {
-			label = keyboard->state == KEYBOARD_STATE_SYMBOLS ?
-				"#+=" : "?123";
-			cairo_set_font_size(cr, 14);
-			cairo_text_extents(cr, label, &extents);
-			cairo_font_extents(cr, &font_extents);
-			cairo_move_to(cr,
-				      cx - extents.width / 2 - extents.x_bearing,
-				      cy + font_extents.height / 2 -
-					      font_extents.descent);
-			cairo_show_text(cr, label);
-			break;
-		}
 		draw_icon_shift(cr, cx, cy,
 				keyboard->state == KEYBOARD_STATE_UPPERCASE ||
 				keyboard->state == KEYBOARD_STATE_LOCKED,
@@ -498,8 +477,7 @@ draw_key(struct keyboard *keyboard,
 
 		/* digit hint in the top-right corner */
 		if (key->hint &&
-		    keyboard->state != KEYBOARD_STATE_SYMBOLS &&
-		    keyboard->state != KEYBOARD_STATE_SYMBOLS2) {
+		    keyboard->state != KEYBOARD_STATE_SYMBOLS) {
 			cairo_set_source_rgb(cr, COL(color_hint));
 			cairo_set_font_size(cr, 11);
 			cairo_text_extents(cr, key->hint, &extents);
@@ -666,8 +644,7 @@ key_press(struct keyboard *keyboard, uint32_t time, const struct key *key)
 	switch (key->key_type) {
 	case keytype_default:
 		if (key->hint &&
-		    keyboard->state != KEYBOARD_STATE_SYMBOLS &&
-		    keyboard->state != KEYBOARD_STATE_SYMBOLS2)
+		    keyboard->state != KEYBOARD_STATE_SYMBOLS)
 			toytimer_arm_once_usec(&keyboard->longpress_timer,
 					       LONGPRESS_USEC);
 		break;
@@ -684,26 +661,26 @@ key_press(struct keyboard *keyboard, uint32_t time, const struct key *key)
 			    WL_KEYBOARD_KEY_STATE_PRESSED);
 		break;
 	case keytype_switch:
-		if (keyboard->state == KEYBOARD_STATE_SYMBOLS) {
-			keyboard->state = KEYBOARD_STATE_SYMBOLS2;
-		} else if (keyboard->state == KEYBOARD_STATE_SYMBOLS2) {
-			keyboard->state = KEYBOARD_STATE_SYMBOLS;
-		} else if (keyboard->state == KEYBOARD_STATE_UPPERCASE &&
-			   time - keyboard->last_shift_time <
-				   CAPS_DOUBLE_TAP_MSEC) {
+		if (keyboard->state == KEYBOARD_STATE_UPPERCASE &&
+		    time - keyboard->last_shift_time < CAPS_DOUBLE_TAP_MSEC) {
 			keyboard->state = KEYBOARD_STATE_LOCKED;
 		} else {
-			keyboard->state =
-				keyboard->state == KEYBOARD_STATE_DEFAULT ?
-				KEYBOARD_STATE_UPPERCASE :
-				KEYBOARD_STATE_DEFAULT;
+			switch (keyboard->state) {
+			case KEYBOARD_STATE_DEFAULT:
+			case KEYBOARD_STATE_SYMBOLS:
+				keyboard->state = KEYBOARD_STATE_UPPERCASE;
+				break;
+			case KEYBOARD_STATE_UPPERCASE:
+			case KEYBOARD_STATE_LOCKED:
+				keyboard->state = KEYBOARD_STATE_DEFAULT;
+				break;
+			}
 		}
 		keyboard->last_shift_time = time;
 		break;
 	case keytype_symbols:
 		keyboard->state =
-			(keyboard->state == KEYBOARD_STATE_SYMBOLS ||
-			 keyboard->state == KEYBOARD_STATE_SYMBOLS2) ?
+			keyboard->state == KEYBOARD_STATE_SYMBOLS ?
 			KEYBOARD_STATE_DEFAULT : KEYBOARD_STATE_SYMBOLS;
 		break;
 	case keytype_space:
@@ -942,8 +919,6 @@ input_method_activate(void *data,
 	/* debug hook so non-default states can be screenshotted headlessly */
 	if (start_state && !strcmp(start_state, "symbols"))
 		keyboard->keyboard->state = KEYBOARD_STATE_SYMBOLS;
-	else if (start_state && !strcmp(start_state, "symbols2"))
-		keyboard->keyboard->state = KEYBOARD_STATE_SYMBOLS2;
 	else if (start_state && !strcmp(start_state, "uppercase"))
 		keyboard->keyboard->state = KEYBOARD_STATE_UPPERCASE;
 	else
