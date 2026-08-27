@@ -11,7 +11,7 @@ FROM python:3.12-slim
 ARG NOVNC_REF=v1.7.0
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates openssl \
+    && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir websockify \
     && git clone --depth 1 --branch ${NOVNC_REF} \
@@ -23,6 +23,5 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 6080
-VOLUME /certs
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
