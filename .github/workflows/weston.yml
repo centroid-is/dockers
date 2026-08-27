@@ -8,10 +8,15 @@ on:
     paths:
       - 'weston/**'
       - '.github/workflows/weston.yml'
+  pull_request:
+    paths:
+      - 'weston/**'
+      - '.github/workflows/weston.yml'
 
 permissions:
   contents: write
   packages: write
+  pull-requests: write
 
 jobs:
   build-and-push:
@@ -27,10 +32,72 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # A pull request gets its own moving tag so the branch can be tested on a
+      # station without touching :latest — pull ghcr.io/<owner>/weston:pr-<number>.
+      # Pushes keep tagging the commit sha and :latest as before.
+      - name: Work out image tags
+        id: tags
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "tags=ghcr.io/${{ github.repository_owner }}/weston:pr-${{ github.event.number }}" >> $GITHUB_OUTPUT
+          else
+            echo "tags=ghcr.io/${{ github.repository_owner }}/weston:${{ github.sha }},ghcr.io/${{ github.repository_owner }}/weston:latest" >> $GITHUB_OUTPUT
+          fi
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
         with:
           context: ./weston
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/weston:${{ github.sha }},ghcr.io/${{ github.repository_owner }}/weston:latest
+          tags: ${{ steps.tags.outputs.tags }}
+
+      - name: Comment the pull request image tag
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const image = `ghcr.io/${{ github.repository_owner }}/weston:pr-${{ github.event.number }}`;
+            const marker = '<!-- weston-pr-image -->';
+            const body = [
+              marker,
+              `### Test image`,
+              '',
+              '```',
+              image,
+              '```',
+              '',
+              'On a station, point the weston service at it and recreate:',
+              '',
+              '```bash',
+              `docker pull ${image}`,
+              `IMAGE=${image} docker compose up -d weston`,
+              '```',
+              '',
+              '(the compose service needs `image: ${IMAGE:-ghcr.io/centroid-is/weston:latest}`,',
+              'or edit the tag in docker-compose.yml directly.)',
+              '',
+              `Rebuilt on every push to this pull request — built from ${context.sha.substring(0, 7)}.`,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
