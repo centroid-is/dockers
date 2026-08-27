@@ -1,0 +1,31 @@
+--- a/clients/editor.c
++++ b/clients/editor.c
+@@ -1368,6 +1368,20 @@ keyboard_focus_handler(struct window *window,
+ {
+ 	struct editor *editor = data;
+
++	if (device && getenv("WESTON_EDITOR_AUTO_ACTIVATE") &&
++	    !editor->active_entry) {
++		struct text_entry *entry = getenv("WESTON_EDITOR_NUMERIC") ?
++			editor->editor : editor->entry;
++		fprintf(stderr, "auto-activate: device=%p entry=%p\n",
++			(void *) device, (void *) entry);
++		fprintf(stderr, "auto-activate: text_input=%p seat=%p\n",
++			(void *) entry->text_input,
++			(void *) input_get_seat(device));
++		text_entry_activate(entry, input_get_seat(device));
++		editor->active_entry = entry;
++		fprintf(stderr, "auto-activate: done\n");
++	}
++
+ 	window_schedule_redraw(editor->window);
+ }
+
+@@ -1637,6 +1651,8 @@ main(int argc, char *argv[])
+ 	editor.window = window_create(editor.display);
+ 	editor.widget = window_frame_create(editor.window, &editor);
++	if (!editor.widget)
++		editor.widget = window_add_widget(editor.window, &editor);
+
+ 	if (text_buffer)
+ 		editor.entry = text_entry_create(&editor, text_buffer);
