@@ -22,7 +22,7 @@ COPY defaults.json mandatory.json index.html /opt/novnc/
 
 # vnc.html is patched at build time from the pinned checkout, never shipped
 # as a hand-edited copy — see patch-vnc-html.py for why.
-COPY centroid.svg /opt/novnc/app/images/icons/centroid.svg
+COPY centroid-mark.svg /opt/novnc/app/images/icons/centroid-mark.svg
 COPY overrides.js /tmp/overrides.js
 COPY patch-vnc-html.py /tmp/patch-vnc-html.py
 RUN python3 /tmp/patch-vnc-html.py && rm /tmp/patch-vnc-html.py /tmp/overrides.js

@@ -50,7 +50,7 @@ html = replace_once(html, "<title>noVNC</title>", "<title>CentroidX</title>", "t
 icon_start = html.index('<link rel="icon"')
 icon_end = html.index(">", html.rindex('<link rel="apple-touch-icon"')) + 1
 html = (html[:icon_start]
-        + '<link rel="icon" type="image/svg+xml" href="app/images/icons/centroid.svg">'
+        + '<link rel="icon" type="image/svg+xml" href="app/images/icons/centroid-mark.svg">'
         + html[icon_end:])
 
 # The wordmark on the connect and disconnect screens. Keeping the <span>

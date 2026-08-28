@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Centroid mark, for use as a favicon.
+
+  Just the mark: the full lockup is the mark plus the CENTROID wordmark on a
+  313x74 canvas, which at 16x16 in a browser tab renders as an illegible
+  smear. Cropped to the mark's own bounds, it reads at tab size the way an
+  app icon is meant to.
+
+  The fill follows the browser's colour scheme rather than being pinned to
+  the brand navy, which disappears against a dark tab strip. Browsers that
+  ignore the media query in an SVG favicon fall back to the navy, which is
+  the correct colour on a light strip.
+
+  Geometry is unchanged from centroid.svg: same three paths, same clip
+  paths, translated onto a square 96x96 canvas with the mark (85.5x74.25)
+  centred, so the icon keeps its margins wherever it is drawn into a square
+  box rather than relying on each browser to pad it.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 96 96"
+     width="96" height="96"
+     role="img" aria-label="Centroid">
+  <style>
+    .mark { fill: #0b1320; }
+    @media (prefers-color-scheme: dark) {
+      .mark { fill: #ffffff; }
+    }
+  </style>
+  <defs>
+    <clipPath id="mark-a">
+      <path d="m 52,150.19922 h 41 v 74.25 H 52 Z m 0,0" clip-rule="nonzero"/>
+    </clipPath>
+    <clipPath id="mark-b">
+      <path d="m 92,190 h 25.27734 v 34.44922 H 92 Z m 0,0" clip-rule="nonzero"/>
+    </clipPath>
+    <clipPath id="mark-c">
+      <path d="M 31.777344,190 H 57 v 34.44922 H 31.777344 Z m 0,0" clip-rule="nonzero"/>
+    </clipPath>
+  </defs>
+  <g transform="translate(-26.527344,-139.32422)">
+    <g clip-path="url(#mark-a)">
+      <path class="mark" fill-rule="nonzero"
+            d="M 74.691406,168.71875 67.4375,181.31641 92.460938,224.74609 H 57.996094 l -5.3125,-9.21484 h 23.824218 l -19.707031,-34.21484 17.890625,-31.0625 18.027344,31.25 -5.332031,9.20312 z m 0,0"/>
+    </g>
+    <g clip-path="url(#mark-b)">
+      <path class="mark" fill-rule="nonzero"
+            d="m 117.60156,224.74609 h -10.63672 l -14.242184,-24.71484 5.320313,-9.24609 z m 0,0"/>
+    </g>
+    <g clip-path="url(#mark-c)">
+      <path class="mark" fill-rule="nonzero"
+            d="M 56.707031,200.01953 42.414062,224.74609 H 31.777344 l 19.613281,-33.97265 z m 0,0"/>
+    </g>
+  </g>
+</svg>
