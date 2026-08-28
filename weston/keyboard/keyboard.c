@@ -99,8 +99,9 @@ enum key_type {
 	keytype_switch,
 	keytype_symbols,
 	keytype_spacer,
-	/* cursor movement; the keysym to tap is on the key itself. Drawn as
-	 * an icon when the label is empty, as text otherwise (Home/End). */
+	/* taps the keysym carried on the key itself: cursor movement, Home,
+	 * End, Delete. Drawn as an icon when the label is empty, as text
+	 * otherwise. */
 	keytype_arrow
 };
 
@@ -206,8 +207,13 @@ static const struct key normal_keys[] = {
  * Numeric keypad: 14 grid units of PANEL_WIDTH/14 px, 4 rows — the same
  * panel footprint as the alpha layout. The keypad is the leftmost 8
  * units, flush with the edge, and the navigation cluster takes the 6 on
- * the right. Phone-style digit order; backspace / minus / plus down the
+ * the right. Phone-style digit order; backspace / minus / delete down the
  * keypad's right; double-width 0, decimal point, Enter along the bottom.
+ *
+ * No plus key: a leading + is not part of any numeric-field convention
+ * (HTML's valid floating-point number does not permit one, and neither
+ * iOS's decimal pad nor Android's numberDecimal offers the key), and the
+ * HMI's own filters strip it, so it could only ever look broken.
  */
 static const struct key numeric_keys[] = {
 	{ keytype_default, "1", "1", "1", 2},
@@ -225,7 +231,7 @@ static const struct key numeric_keys[] = {
 	{ keytype_default, "7", "7", "7", 2},
 	{ keytype_default, "8", "8", "8", 2},
 	{ keytype_default, "9", "9", "9", 2},
-	{ keytype_default, "+", "+", "+", 2},
+	{ keytype_arrow, "Del", "Del", "Del", 2, NULL, XKB_KEY_Delete},
 	{ keytype_arrow, "Home", "Home", "Home", 2, NULL, XKB_KEY_Home},
 	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Up},
 	{ keytype_arrow, "End", "End", "End", 2, NULL, XKB_KEY_End},
