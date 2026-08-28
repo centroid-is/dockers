@@ -1,5 +1,4 @@
 {
-  "resize": "scale",
   "encrypt": true,
   "autoconnect": "true",
   "reconnect": true,
