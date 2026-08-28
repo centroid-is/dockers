@@ -31,9 +31,9 @@
  *  - opaque light sheet, rounded flat keys, staggered home row,
  *    accent-colored Enter, pressed-key highlight, cairo-drawn icons
  *  - digit hints on the top row, long-press to type them
- *  - backspace auto-repeat on hold
+ *  - auto-repeat on hold for backspace and the navigation keys
  *  - one-shot shift, double-tap for caps lock
- *  - a real numeric keypad (decimal point, minus, plus) for
+ *  - a real numeric keypad (decimal point, minus, delete) for
  *    digits/number content purposes
  *  - a navigation cluster on both layouts: Home/Up/End over
  *    Left/Down/Right, laid out like a physical keyboard
@@ -59,7 +59,7 @@
 #include "shared/helpers.h"
 #include "shared/xalloc.h"
 
-/* long-press delay for digit hints, backspace repeat delay/rate */
+/* long-press delay for digit hints, auto-repeat delay/rate */
 #define LONGPRESS_USEC (500 * 1000)
 #define REPEAT_DELAY_MSEC 500
 #define REPEAT_RATE_MSEC 60
@@ -118,7 +118,8 @@ struct key {
 	/* small corner hint, typed via long-press (NULL for none) */
 	const char *hint;
 
-	/* keytype_arrow only: the keysym this key taps */
+	/* the keysym this key taps; set for keytype_arrow and
+	 * keytype_backspace, which share the tap-and-repeat path */
 	xkb_keysym_t keysym;
 };
 
@@ -185,7 +186,7 @@ static const struct key normal_keys[] = {
 	{ keytype_default, "b", "B", "?", 2},
 	{ keytype_default, "n", "N", "+", 2},
 	{ keytype_default, "m", "M", "=", 2},
-	{ keytype_backspace, "", "", "", 3},
+	{ keytype_backspace, "", "", "", 3, NULL, XKB_KEY_BackSpace},
 	{ keytype_arrow, "Home", "Home", "Home", 2, NULL, XKB_KEY_Home},
 	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Up},
 	{ keytype_arrow, "End", "End", "End", 2, NULL, XKB_KEY_End},
@@ -219,7 +220,7 @@ static const struct key numeric_keys[] = {
 	{ keytype_default, "1", "1", "1", 2},
 	{ keytype_default, "2", "2", "2", 2},
 	{ keytype_default, "3", "3", "3", 2},
-	{ keytype_backspace, "", "", "", 2},
+	{ keytype_backspace, "", "", "", 2, NULL, XKB_KEY_BackSpace},
 	{ keytype_spacer, "", "", "", 6},
 
 	{ keytype_default, "4", "4", "4", 2},
@@ -705,15 +706,31 @@ repeat_handler(struct toytimer *tt)
 	struct keyboard *keyboard =
 		container_of(tt, struct keyboard, repeat_timer);
 
+	/* Only keys that carry a keysym arm this timer, but the release that
+	 * disarms it and a pending expiry can race. */
+	if (!keyboard->held_key)
+		return;
+
 	tap_keysym(keyboard->keyboard, keyboard->held_time,
-		   XKB_KEY_BackSpace);
+		   keyboard->held_key->keysym);
+}
+
+/* Repeat while held, at the same delay and rate for every key that does it. */
+static void
+arm_repeat(struct keyboard *keyboard)
+{
+	struct itimerspec its;
+
+	its.it_value.tv_sec = 0;
+	its.it_value.tv_nsec = REPEAT_DELAY_MSEC * 1000000L;
+	its.it_interval.tv_sec = 0;
+	its.it_interval.tv_nsec = REPEAT_RATE_MSEC * 1000000L;
+	toytimer_arm(&keyboard->repeat_timer, &its);
 }
 
 static void
 key_press(struct keyboard *keyboard, uint32_t time, const struct key *key)
 {
-	struct itimerspec its;
-
 	keyboard->held_key = key;
 	keyboard->long_fired = false;
 	keyboard->held_time = time;
@@ -726,12 +743,9 @@ key_press(struct keyboard *keyboard, uint32_t time, const struct key *key)
 					       LONGPRESS_USEC);
 		break;
 	case keytype_backspace:
-		tap_keysym(keyboard->keyboard, time, XKB_KEY_BackSpace);
-		its.it_value.tv_sec = 0;
-		its.it_value.tv_nsec = REPEAT_DELAY_MSEC * 1000000L;
-		its.it_interval.tv_sec = 0;
-		its.it_interval.tv_nsec = REPEAT_RATE_MSEC * 1000000L;
-		toytimer_arm(&keyboard->repeat_timer, &its);
+	case keytype_arrow:
+		tap_keysym(keyboard->keyboard, time, key->keysym);
+		arm_repeat(keyboard);
 		break;
 	case keytype_enter:
 		send_keysym(keyboard->keyboard, time, XKB_KEY_Return,
@@ -759,9 +773,6 @@ key_press(struct keyboard *keyboard, uint32_t time, const struct key *key)
 		keyboard->state =
 			keyboard->state == KEYBOARD_STATE_SYMBOLS ?
 			KEYBOARD_STATE_DEFAULT : KEYBOARD_STATE_SYMBOLS;
-		break;
-	case keytype_arrow:
-		tap_keysym(keyboard->keyboard, time, key->keysym);
 		break;
 	case keytype_space:
 	case keytype_spacer:
@@ -796,6 +807,7 @@ key_release(struct keyboard *keyboard, uint32_t time)
 		commit_text(keyboard->keyboard, " ");
 		break;
 	case keytype_backspace:
+	case keytype_arrow:
 		toytimer_disarm(&keyboard->repeat_timer);
 		break;
 	case keytype_enter:
