@@ -18,6 +18,15 @@ if [ ! -f "$PEM" ]; then
     chmod 600 "$CERT_DIR/novnc.key" "$PEM"
 fi
 
+# Per-station branding. One image serves every HMI, so the name cannot be
+# baked in; it is written here for the page to fetch, in the same shape as
+# defaults.json. Unset means the tab just reads "CentroidX".
+: "${NOVNC_STATION_NAME:=}"
+printf '{"station":"%s"}\n' "$NOVNC_STATION_NAME" > /opt/novnc/branding.json
+if [ -n "$NOVNC_STATION_NAME" ]; then
+    echo "novnc: station name '$NOVNC_STATION_NAME'"
+fi
+
 exec websockify \
     --web /opt/novnc \
     --cert "$PEM" \

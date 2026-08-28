@@ -23,5 +23,46 @@ if ANCHOR not in html:
 if "CentroidX:" in html:
     sys.exit("patch-vnc-html: overrides already present")
 
-VNC_HTML.write_text(html.replace(ANCHOR, OVERRIDES.read_text() + ANCHOR, 1))
-print(f"patch-vnc-html: overrides inserted into {VNC_HTML}")
+html = html.replace(ANCHOR, OVERRIDES.read_text() + ANCHOR, 1)
+
+
+# --- branding -------------------------------------------------------------
+#
+# The tab is the only part of noVNC an operator sees for more than a moment,
+# and it read "Weston VNC backend - noVNC" under a noVNC favicon. Neither
+# name means anything to someone looking at a CentroidX station.
+#
+# Each replacement is asserted, so a noVNC upgrade that renames any of this
+# fails the build rather than quietly reverting to upstream branding.
+
+def replace_once(haystack: str, old: str, new: str, what: str) -> str:
+    if old not in haystack:
+        sys.exit(f"patch-vnc-html: could not find {what}; noVNC's vnc.html has "
+                 "changed and the branding needs rework")
+    return haystack.replace(old, new, 1)
+
+
+html = replace_once(html, "<title>noVNC</title>", "<title>CentroidX</title>", "the title")
+
+# One SVG replaces the .ico and every apple-touch PNG. Browsers prefer the
+# SVG when offered, and leaving the PNGs in place would keep noVNC's mark on
+# an iOS home screen.
+icon_start = html.index('<link rel="icon"')
+icon_end = html.index(">", html.rindex('<link rel="apple-touch-icon"')) + 1
+html = (html[:icon_start]
+        + '<link rel="icon" type="image/svg+xml" href="app/images/icons/centroid.svg">'
+        + html[icon_end:])
+
+# The wordmark on the connect and disconnect screens. Keeping the <span>
+# preserves noVNC's two-tone treatment of it.
+html = replace_once(html,
+                    '<h1 class="noVNC_logo" translate="no"><span>no</span><br>VNC</h1>',
+                    '<h1 class="noVNC_logo" translate="no"><span>Centroid</span><br>X</h1>',
+                    "the connect-screen wordmark")
+html = replace_once(html,
+                    '<p class="noVNC_logo" translate="no"><span>no</span>VNC</p>',
+                    '<p class="noVNC_logo" translate="no"><span>Centroid</span>X</p>',
+                    "the status wordmark")
+
+VNC_HTML.write_text(html)
+print(f"patch-vnc-html: overrides and branding applied to {VNC_HTML}")
