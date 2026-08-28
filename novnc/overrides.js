@@ -15,6 +15,24 @@
                 (location.protocol === 'https:' ? 443 : 80);
         }
 
+        // Tab title. noVNC sets it from the VNC server's desktop name, which
+        // is "Weston VNC backend" — accurate and useless to an operator. The
+        // station name comes from NOVNC_STATION_NAME via the entrypoint, so
+        // one image can serve "CentroidX - Frystar" and "CentroidX - Pokkun".
+        let station = '';
+        try {
+            const r = await fetch('./branding.json');
+            if (r.ok) { station = (await r.json()).station || ''; }
+        } catch (err) {
+            Log.Warn("Couldn't fetch branding.json: " + err);
+        }
+        const PAGE_TITLE = station ? `CentroidX - ${station}` : 'CentroidX';
+        document.title = PAGE_TITLE;
+        UI.updateDesktopName = (e) => {
+            UI.desktopName = e.detail.name;
+            document.title = PAGE_TITLE;
+        };
+
         const REMEMBER = defaults['remember_credentials'] !== false;
         const KEY = n => `centroidx.${n}.${defaults['host'] || location.hostname}`;
 
