@@ -35,6 +35,8 @@
  *  - one-shot shift, double-tap for caps lock
  *  - a real numeric keypad (decimal point, minus, plus) for
  *    digits/number content purposes
+ *  - a navigation cluster on both layouts: Home/Up/End over
+ *    Left/Down/Right, laid out like a physical keyboard
  *  - direct commit_string typing (no preedit)
  */
 
@@ -96,7 +98,10 @@ enum key_type {
 	keytype_space,
 	keytype_switch,
 	keytype_symbols,
-	keytype_spacer
+	keytype_spacer,
+	/* cursor movement; the keysym to tap is on the key itself. Drawn as
+	 * an icon when the label is empty, as text otherwise (Home/End). */
+	keytype_arrow
 };
 
 struct key {
@@ -111,6 +116,9 @@ struct key {
 
 	/* small corner hint, typed via long-press (NULL for none) */
 	const char *hint;
+
+	/* keytype_arrow only: the keysym this key taps */
+	xkb_keysym_t keysym;
 };
 
 struct layout {
@@ -136,8 +144,9 @@ struct layout {
 };
 
 /*
- * Alpha layout: 20 grid units of 36 px -> 720 px wide, 4 rows of 50 px,
- * the stock footprint. Letter keys are 2 units; the home row is
+ * Alpha layout: 26 grid units of PANEL_WIDTH/26 px, 4 rows of 50 px.
+ * The typing block is the stock 20 units; the 6 units on the right are
+ * the navigation cluster. Letter keys are 2 units; the home row is
  * staggered with 1-unit spacers like Gboard. The top row carries digit
  * hints typed by long-press; the ?123 page has the digits full-size.
  */
@@ -152,6 +161,7 @@ static const struct key normal_keys[] = {
 	{ keytype_default, "i", "I", "8", 2, "8"},
 	{ keytype_default, "o", "O", "9", 2, "9"},
 	{ keytype_default, "p", "P", "0", 2, "0"},
+	{ keytype_spacer, "", "", "", 6},
 
 	{ keytype_spacer, "", "", "", 1},
 	{ keytype_default, "a", "A", "-", 2},
@@ -164,6 +174,7 @@ static const struct key normal_keys[] = {
 	{ keytype_default, "k", "K", "&", 2},
 	{ keytype_default, "l", "L", "@", 2},
 	{ keytype_spacer, "", "", "", 1},
+	{ keytype_spacer, "", "", "", 6},
 
 	{ keytype_switch, "", "", "", 3},
 	{ keytype_default, "z", "Z", "*", 2},
@@ -174,6 +185,9 @@ static const struct key normal_keys[] = {
 	{ keytype_default, "n", "N", "+", 2},
 	{ keytype_default, "m", "M", "=", 2},
 	{ keytype_backspace, "", "", "", 3},
+	{ keytype_arrow, "Home", "Home", "Home", 2, NULL, XKB_KEY_Home},
+	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Up},
+	{ keytype_arrow, "End", "End", "End", 2, NULL, XKB_KEY_End},
 
 	/* TODO(languages): when Icelandic/Polish land, a globe key goes
 	 * between ?123 and the comma (where Gboard keeps its gear key)
@@ -182,51 +196,62 @@ static const struct key normal_keys[] = {
 	{ keytype_default, ",", ",", "_", 2},
 	{ keytype_space, "", "", "", 10},
 	{ keytype_default, ".", ".", "%", 2},
-	{ keytype_enter, "", "", "", 3}
+	{ keytype_enter, "", "", "", 3},
+	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Left},
+	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Down},
+	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Right}
 };
 
 /*
- * Numeric keypad: 12 grid units of 60 px -> 720 px wide, 4 rows — the
- * same panel footprint as the alpha layout. The keypad itself is 8
- * units, centered by 2-unit spacers on each side. Phone-style digit
- * order; backspace / minus / plus down the right; double-width 0,
- * decimal point, Enter along the bottom.
+ * Numeric keypad: 14 grid units of PANEL_WIDTH/14 px, 4 rows — the same
+ * panel footprint as the alpha layout. The keypad is the leftmost 8
+ * units, flush with the edge, and the navigation cluster takes the 6 on
+ * the right. Phone-style digit order; backspace / minus / plus down the
+ * keypad's right; double-width 0, decimal point, Enter along the bottom.
  */
 static const struct key numeric_keys[] = {
-	{ keytype_spacer, "", "", "", 2},
 	{ keytype_default, "1", "1", "1", 2},
 	{ keytype_default, "2", "2", "2", 2},
 	{ keytype_default, "3", "3", "3", 2},
 	{ keytype_backspace, "", "", "", 2},
-	{ keytype_spacer, "", "", "", 2},
+	{ keytype_spacer, "", "", "", 6},
 
-	{ keytype_spacer, "", "", "", 2},
 	{ keytype_default, "4", "4", "4", 2},
 	{ keytype_default, "5", "5", "5", 2},
 	{ keytype_default, "6", "6", "6", 2},
 	{ keytype_default, "-", "-", "-", 2},
-	{ keytype_spacer, "", "", "", 2},
+	{ keytype_spacer, "", "", "", 6},
 
-	{ keytype_spacer, "", "", "", 2},
 	{ keytype_default, "7", "7", "7", 2},
 	{ keytype_default, "8", "8", "8", 2},
 	{ keytype_default, "9", "9", "9", 2},
 	{ keytype_default, "+", "+", "+", 2},
-	{ keytype_spacer, "", "", "", 2},
+	{ keytype_arrow, "Home", "Home", "Home", 2, NULL, XKB_KEY_Home},
+	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Up},
+	{ keytype_arrow, "End", "End", "End", 2, NULL, XKB_KEY_End},
 
-	{ keytype_spacer, "", "", "", 2},
 	{ keytype_default, "0", "0", "0", 4},
 	{ keytype_default, ".", ".", ".", 2},
 	{ keytype_enter, "", "", "", 2},
-	{ keytype_spacer, "", "", "", 2}
+	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Left},
+	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Down},
+	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Right}
 };
+
+/*
+ * Both layouts must come out the same size: window_schedule_resize() is
+ * driven by columns * unit, but weston keeps whichever input-panel
+ * surface was created first, so a layout that disagrees gets clipped or
+ * letterboxed rather than resizing the panel.
+ */
+#define PANEL_WIDTH 900.0
 
 static const struct layout normal_layout = {
 	normal_keys,
 	sizeof(normal_keys) / sizeof(*normal_keys),
-	20,
+	26,
 	4,
-	36,
+	PANEL_WIDTH / 26,
 	50,
 	0,
 	"en",
@@ -236,11 +261,11 @@ static const struct layout normal_layout = {
 static const struct layout numeric_layout = {
 	numeric_keys,
 	sizeof(numeric_keys) / sizeof(*numeric_keys),
-	12,
+	14,
 	4,
-	60,
+	PANEL_WIDTH / 14,
 	50,
-	112,
+	0,
 	"en",
 	ZWP_TEXT_INPUT_V1_TEXT_DIRECTION_LTR
 };
@@ -384,6 +409,45 @@ draw_icon_enter(cairo_t *cr, double cx, double cy)
 }
 
 static void
+draw_icon_arrow(cairo_t *cr, double cx, double cy, xkb_keysym_t sym)
+{
+	/* stemmed arrow with a chevron head, stroked to sit alongside the
+	 * backspace and enter icons. dx/dy is the direction it points. */
+	double dx = 0, dy = 0;
+
+	switch (sym) {
+	case XKB_KEY_Left:
+		dx = -1;
+		break;
+	case XKB_KEY_Right:
+		dx = 1;
+		break;
+	case XKB_KEY_Up:
+		dy = -1;
+		break;
+	default:
+		dy = 1;
+		break;
+	}
+
+	cairo_set_line_width(cr, 2.0);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+
+	cairo_new_path(cr);
+	cairo_move_to(cr, cx - dx * 8, cy - dy * 8);
+	cairo_line_to(cr, cx + dx * 8, cy + dy * 8);
+	cairo_stroke(cr);
+
+	/* head: back off the tip by 6 along the axis, 6 to either side */
+	cairo_new_path(cr);
+	cairo_move_to(cr, cx + dx * 2 - dy * 6, cy + dy * 2 - dx * 6);
+	cairo_line_to(cr, cx + dx * 8, cy + dy * 8);
+	cairo_line_to(cr, cx + dx * 2 + dy * 6, cy + dy * 2 + dx * 6);
+	cairo_stroke(cr);
+}
+
+static void
 draw_key(struct keyboard *keyboard,
 	 const struct key *key,
 	 cairo_t *cr,
@@ -466,6 +530,15 @@ draw_key(struct keyboard *keyboard,
 	case keytype_space:
 	case keytype_spacer:
 		break;
+	case keytype_arrow:
+		if (!key->label[0]) {
+			draw_icon_arrow(cr, cx, cy, key->keysym);
+			break;
+		}
+		/* labelled nav keys (Home/End) fall through and draw as
+		 * text; their three state labels are identical, so
+		 * label_from_key() is stable across shift. */
+		/* fallthrough */
 	default:
 		label = label_from_key(keyboard, key);
 		cairo_set_font_size(cr, strlen(label) > 1 ? 14 : 19);
@@ -680,6 +753,9 @@ key_press(struct keyboard *keyboard, uint32_t time, const struct key *key)
 		keyboard->state =
 			keyboard->state == KEYBOARD_STATE_SYMBOLS ?
 			KEYBOARD_STATE_DEFAULT : KEYBOARD_STATE_SYMBOLS;
+		break;
+	case keytype_arrow:
+		tap_keysym(keyboard->keyboard, time, key->keysym);
 		break;
 	case keytype_space:
 	case keytype_spacer:
