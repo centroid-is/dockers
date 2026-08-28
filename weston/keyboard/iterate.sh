@@ -61,7 +61,9 @@ python3 - "$S" <<'EOF'
 import sys
 from PIL import Image
 s = sys.argv[1]
-Image.open(f"{s}/shot-text.png").crop((520, 830, 1420, 1080)).save(f"{s}/shot-text-crop.png")
-Image.open(f"{s}/shot-numeric.png").crop((520, 830, 1420, 1080)).save(f"{s}/shot-numeric-crop.png")
+# the panel is PANEL_WIDTH (900) x 200, bottom-centered on a 1920x1080
+# output: x 510..1410, y 880..1080. Crop with a small margin around it.
+Image.open(f"{s}/shot-text.png").crop((500, 860, 1420, 1080)).save(f"{s}/shot-text-crop.png")
+Image.open(f"{s}/shot-numeric.png").crop((500, 860, 1420, 1080)).save(f"{s}/shot-numeric-crop.png")
 EOF
 echo DONE
