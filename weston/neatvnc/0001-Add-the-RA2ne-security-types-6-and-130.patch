@@ -1,6 +1,6 @@
-From f5047ccf43ba7f3e86dff3d654fcb22332010039 Mon Sep 17 00:00:00 2001
+From 0346dc1a8f4f265648c00fa385add56219d32a97 Mon Sep 17 00:00:00 2001
 From: Centroid <jon@centroid.is>
-Date: Tue, 1 Sep 2026 10:51:46 +0000
+Date: Thu, 27 Aug 2026 12:06:07 +0000
 Subject: [PATCH] Add the RA2ne security types (6 and 130)
 
 RA2ne is RA2 with the session cipher removed: the RSA handshake runs in
@@ -16,7 +16,7 @@ verify the server at all. RA2ne gives it the server's RSA public key to
 verify instead, at no cost to the session it was already going to run in
 the clear.
 
-The hunks:
+The four hunks:
 
   * rfb-proto.h, server.c: the two type numbers, offered only when
     NVNC_AUTH_REQUIRE_ENCRYPTION is unset -- the same guard Apple DH
@@ -24,16 +24,13 @@ The hunks:
     They are listed ahead of Apple DH so that a client supporting both
     picks the one that authenticates the server; clients take the first
     type they recognise in the server's order.
-    security_type_to_string() switches over the enum without a default
-    case, so both names are added there too.
 
-  * server.c, client.h: the existing RSA-AES cases now cover their "ne"
+  * server.c, common.h: the existing RSA-AES cases now cover their "ne"
     counterparts and record which was chosen. Everything up to the
     credentials is identical, so the handshake code is shared verbatim.
 
-  * auth/rsa-aes.c: for the "ne" types, take the cipher off before the
-    credentials are handed to the (asynchronous) auth callback, which is
-    what eventually writes SecurityResult.
+  * auth/rsa-aes.c: for the "ne" types, take the cipher off before
+    security_handshake_ok() writes SecurityResult.
 
   * stream/rsa-aes.c, stream/tcp.c: the downgrade itself. tcp.c's vtable
     is exported rather than duplicated so the stream is restored to
@@ -45,21 +42,21 @@ The hunks:
     plaintext the plain reader will never see, so the connection is
     refused rather than guessing.
 ---
- include/client.h        |  3 +++
+ include/common.h        |  3 +++
  include/rfb-proto.h     |  2 ++
  include/stream/stream.h |  1 +
  include/stream/tcp.h    |  2 ++
  src/auth/rsa-aes.c      |  8 ++++++++
- src/server.c            | 14 ++++++++++++++
+ src/server.c            | 13 +++++++++++++
  src/stream/rsa-aes.c    | 31 +++++++++++++++++++++++++++++++
  src/stream/tcp.c        |  4 ++--
- 8 files changed, 63 insertions(+), 2 deletions(-)
+ 8 files changed, 62 insertions(+), 2 deletions(-)
 
-diff --git a/include/client.h b/include/client.h
-index d51ec87..8e73d9b 100644
---- a/include/client.h
-+++ b/include/client.h
-@@ -131,6 +131,9 @@ struct nvnc_client {
+diff --git a/include/common.h b/include/common.h
+index e0b87c2..dd5f72d 100644
+--- a/include/common.h
++++ b/include/common.h
+@@ -144,6 +144,9 @@ struct nvnc_client {
  		size_t challenge_len;
  		uint8_t challenge[32];
  		struct crypto_rsa_pub_key* pub;
@@ -70,7 +67,7 @@ index d51ec87..8e73d9b 100644
  #endif
  };
 diff --git a/include/rfb-proto.h b/include/rfb-proto.h
-index 73db5a4..e852a39 100644
+index e492a66..742c565 100644
 --- a/include/rfb-proto.h
 +++ b/include/rfb-proto.h
 @@ -30,10 +30,12 @@ enum rfb_security_type {
@@ -87,10 +84,10 @@ index 73db5a4..e852a39 100644
  
  enum rfb_security_handshake_result {
 diff --git a/include/stream/stream.h b/include/stream/stream.h
-index ddbab3a..fd5aa99 100644
+index ce1caf8..992c123 100644
 --- a/include/stream/stream.h
 +++ b/include/stream/stream.h
-@@ -121,6 +121,7 @@ int stream_upgrade_to_tls(struct stream* self, void* context);
+@@ -119,6 +119,7 @@ int stream_upgrade_to_tls(struct stream* self, void* context);
  #endif
  
  #ifdef HAVE_CRYPTO
@@ -112,12 +109,12 @@ index 22572c9..2833c72 100644
  		void* userdata);
  int stream_tcp_close(struct stream* self);
 diff --git a/src/auth/rsa-aes.c b/src/auth/rsa-aes.c
-index dea2e7c..7f041dd 100644
+index 66f10cb..ed02886 100644
 --- a/src/auth/rsa-aes.c
 +++ b/src/auth/rsa-aes.c
-@@ -295,6 +295,14 @@ static int on_rsa_aes_credentials(struct nvnc_client* client)
- 			password_len)
- 		return 0;
+@@ -294,6 +294,14 @@ static int on_rsa_aes_credentials(struct nvnc_client* client)
+ 
+ 	update_min_rtt(client);
  
 +	/* The "ne" types encrypt the handshake only, so SecurityResult and
 +	 * everything after it go out in the clear. */
@@ -127,27 +124,14 @@ index dea2e7c..7f041dd 100644
 +		return 0;
 +	}
 +
- 	struct nvnc_auth_creds* creds =
- 		nvnc_auth_creds_new(NVNC_AUTH_CREDS_PLAIN);
- 	nvnc_assert(creds, "Out of memory");
+ 	if (server->auth_fn(username, password, server->auth_ud)) {
+ 		security_handshake_ok(client, username);
+ 		client->state = VNC_CLIENT_STATE_WAITING_FOR_INIT;
 diff --git a/src/server.c b/src/server.c
-index d7911f2..c5bf061 100644
+index b94ed0d..86f82a4 100644
 --- a/src/server.c
 +++ b/src/server.c
-@@ -268,10 +268,12 @@ static const char* security_type_to_string(enum rfb_security_type type)
- 	case RFB_SECURITY_TYPE_NONE: return "none";
- 	case RFB_SECURITY_TYPE_VNC_AUTH: return "3des";
- 	case RFB_SECURITY_TYPE_RSA_AES: return "rsa-aes128";
-+	case RFB_SECURITY_TYPE_RSA_AES_NE: return "rsa-aes128-ne";
- 	case RFB_SECURITY_TYPE_TIGHT: return "tight";
- 	case RFB_SECURITY_TYPE_VENCRYPT: return "vencrypt";
- 	case RFB_SECURITY_TYPE_APPLE_DH: return "apple-dh";
- 	case RFB_SECURITY_TYPE_RSA_AES256: return "rsa-aes256";
-+	case RFB_SECURITY_TYPE_RSA_AES256_NE: return "rsa-aes256-ne";
- 	}
- 	return "UNKNOWN";
- }
-@@ -313,6 +315,13 @@ static void init_security_types(struct nvnc* server)
+@@ -277,6 +277,13 @@ static void init_security_types(struct nvnc* server)
  		ADD_SECURITY_TYPE(RFB_SECURITY_TYPE_RSA_AES);
  
  		if (!(server->auth_flags & NVNC_AUTH_REQUIRE_ENCRYPTION)) {
@@ -159,9 +143,9 @@ index d7911f2..c5bf061 100644
 +			ADD_SECURITY_TYPE(RFB_SECURITY_TYPE_RSA_AES_NE);
 +
  			ADD_SECURITY_TYPE(RFB_SECURITY_TYPE_APPLE_DH);
- 
- 			if ((server->auth_flags & NVNC_AUTH_ALLOW_BROKEN_CRYPTO) &&
-@@ -489,16 +498,21 @@ static int on_security_message(struct nvnc_client* client)
+ 		}
+ #endif
+@@ -380,16 +387,22 @@ static int on_security_message(struct nvnc_client* client)
  		client->state = VNC_CLIENT_STATE_WAITING_FOR_APPLE_DH_RESPONSE;
  		break;
  	case RFB_SECURITY_TYPE_RSA_AES:
@@ -169,7 +153,8 @@ index d7911f2..c5bf061 100644
  		client->rsa.hash_type = CRYPTO_HASH_SHA1;
  		client->rsa.cipher_type = CRYPTO_CIPHER_AES_EAX;
  		client->rsa.challenge_len = 16;
-+		client->rsa.encrypt_session = type == RFB_SECURITY_TYPE_RSA_AES;
++		client->rsa.encrypt_session =
++			type == RFB_SECURITY_TYPE_RSA_AES;
  		rsa_aes_send_public_key(client);
  		client->state = VNC_CLIENT_STATE_WAITING_FOR_RSA_AES_PUBLIC_KEY;
  		break;
@@ -226,10 +211,10 @@ index 89cd1a2..4cdeba0 100644
  		enum crypto_cipher_type cipher_type,
  		const uint8_t* enc_key, const uint8_t* dec_key)
 diff --git a/src/stream/tcp.c b/src/stream/tcp.c
-index 95f5aa8..560e4c2 100644
+index 53d8237..edcf36c 100644
 --- a/src/stream/tcp.c
 +++ b/src/stream/tcp.c
-@@ -291,7 +291,7 @@ void stream_tcp_exec_and_send(struct stream* self,
+@@ -266,7 +266,7 @@ void stream_tcp_exec_and_send(struct stream* self,
  	stream_tcp__flush(self);
  }
  
@@ -238,7 +223,7 @@ index 95f5aa8..560e4c2 100644
  	.close = stream_tcp_close,
  	.destroy = stream_tcp_destroy,
  	.read = stream_tcp_read,
-@@ -303,7 +303,7 @@ static struct stream_impl impl = {
+@@ -278,7 +278,7 @@ static struct stream_impl impl = {
  int stream_tcp_init(struct stream* self, int fd, stream_event_fn on_event,
  		void* userdata)
  {
