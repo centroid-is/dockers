@@ -68,3 +68,19 @@ before any VNC client connected.
 `clipboard_ext.py` takes the same arguments and additionally prints the
 server's advertised capabilities and, for each Provide message, the declared
 length against the number of bytes actually inflated.
+
+## `retained.sh`
+
+`retained.sh [image]` drives both of the above and asserts byte **counts**,
+which is the part that matters: a selection served truncated or doubled reads
+correctly at a glance and is only caught by counting. It covers the selection
+this backend keeps serving after the client that published it has gone (short
+and 4 MiB), a requester killed mid-transfer, and three copies in a row on the
+client-facing side. It brings its own `westonc`/`vncclient` containers up and
+down, so it wants the `vnctest` network and the `wl-clipboard` image above,
+and nothing else running under those names.
+
+```sh
+sh retained.sh                 # against weston-clip-test
+sh retained.sh some-other-image
+```

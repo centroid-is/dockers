@@ -333,6 +333,14 @@ the other.
 | client disconnects holding the selection | weston alive, selection still pasteable on `default` |
 | `weston-screenshooter` with a client attached | 1s, `0001`'s fix still holds |
 | `SIGTERM` with a selection live | exit 0 |
+| retained selection, 23 B and 4 MiB, pasted repeatedly | exact byte count every time |
+| requester killed mid-transfer, 6 rounds | weston alive, selection still whole |
+| three copies in a row, client side | one distinct `ServerCutText` length |
+
+The last three rows are `verify/retained.sh`, which asserts byte **counts**
+rather than content. A selection that comes back subtly wrong — truncated, or
+served twice over — reads correctly at a glance and is only visible when
+counted.
 
 The 512 KiB case matters because it is the only one that exercises the partial
 write (the requesting client's pipe fills, `EAGAIN`, and the transfer finishes
@@ -341,6 +349,37 @@ from a `WL_EVENT_WRITABLE` handler) and the multi-read on the way back.
 What was **not** tested: `renderer=gl`, a `drm,vnc` pair, a real browser, and
 the actual HMI application. The claim about `flutter_elinux_wayland` above is
 read out of its source, not observed.
+
+### SIGPIPE
+
+Worth knowing about, because it is not obvious and it is fatal.
+
+The fd this backend writes clipboard text into belongs to the *requesting
+client*, which is free to exit part-way through the transfer. Writing to a
+pipe whose reader has gone raises SIGPIPE, and:
+
+```
+$ grep -rn SIGPIPE libweston/ frontend/ shared/
+$
+```
+
+weston installs no handler for it anywhere, so the default disposition
+applies and the entire compositor dies — exit 141, one line of `Broken pipe`,
+every client taken down with it. This was seen once during development, as a
+container exiting 141 immediately after a clipboard transfer.
+
+So the write goes through `vnc_write_nosigpipe()`, which blocks SIGPIPE across
+the `write()` and consumes the pending signal if it fired, leaving the caller
+with a plain `EPIPE` to handle. `backend-rdp` has the same exposure in
+`clipboard_data_source_write()` and no such guard; its clipboard is just
+exercised far less.
+
+Honest caveat: no deterministic reproducer was built for this. `wl-paste`
+drains the pipe into memory as fast as it arrives, so killing it mid-transfer
+does not leave a write stranded — `verify/retained.sh` does six rounds of
+exactly that and the *unguarded* build survives them too. The guard is here
+because the failure mode is real, cheap to prevent and catastrophic when it
+lands, not because a test demonstrates it.
 
 ### One neatvnc oddity, harmless
 

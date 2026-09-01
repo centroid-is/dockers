@@ -1,4 +1,4 @@
-From 2700a449bda47542d1db996904aa101f32df6ca7 Mon Sep 17 00:00:00 2001
+From ff1de585d53e63593183be6214dd3dab025e97f5 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?J=C3=B3n=20Bjarni=20Bjarnason?= <jon@centroid.is>
 Date: Tue, 1 Sep 2026 14:45:48 +0000
 Subject: [PATCH] vnc: bridge the clipboard between RFB cut text and the
@@ -33,22 +33,24 @@ extended clipboard send UTF-8, and neatvnc passes both through
 unconverted. Incoming text that is not valid UTF-8 is therefore treated
 as latin-1 and converted, which leaves ASCII alone either way.
 ---
- libweston/backend-vnc/vnc.c | 615 ++++++++++++++++++++++++++++++++++++
- 1 file changed, 615 insertions(+)
+ libweston/backend-vnc/vnc.c | 677 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 677 insertions(+)
 
 diff --git a/libweston/backend-vnc/vnc.c b/libweston/backend-vnc/vnc.c
-index 6d3f674..e39ea79 100644
+index 6d3f674..70f4105 100644
 --- a/libweston/backend-vnc/vnc.c
 +++ b/libweston/backend-vnc/vnc.c
-@@ -34,6 +34,7 @@
+@@ -34,6 +34,9 @@
  #include <stdlib.h>
  #include <string.h>
  #include <errno.h>
 +#include <fcntl.h>
++#include <pthread.h>
++#include <signal.h>
  #include <linux/input.h>
  #include <netinet/in.h>
  #include <pwd.h>
-@@ -78,6 +79,12 @@ struct vnc_backend {
+@@ -78,6 +81,12 @@ struct vnc_backend {
  
  	const struct pixel_format_info **formats;
  	unsigned int formats_count;
@@ -61,7 +63,7 @@ index 6d3f674..e39ea79 100644
  };
  
  struct vnc_output {
-@@ -104,6 +111,43 @@ struct vnc_peer {
+@@ -104,6 +113,47 @@ struct vnc_peer {
  	struct wl_list link;
  };
  
@@ -71,6 +73,10 @@ index 6d3f674..e39ea79 100644
 +	struct vnc_backend *backend;
 +	char *data;
 +	size_t size;
++	/* Set once weston has handed the selection to someone else. The
++	 * source outlives that (see vnc_data_source_cancel()), and must not
++	 * serve its stale text if it is somehow asked to. */
++	bool cancelled;
 +};
 +
 +/* One seat whose selection is bridged to and from the VNC clients. */
@@ -105,7 +111,7 @@ index 6d3f674..e39ea79 100644
  struct vnc_head {
  	struct weston_head base;
  };
-@@ -788,6 +832,571 @@ vnc_update_buffer(struct nvnc_display *display, struct pixman_region32 *damage)
+@@ -788,6 +838,627 @@ vnc_update_buffer(struct nvnc_display *display, struct pixman_region32 *damage)
  	pixman_region_fini(&nvnc_damage);
  }
  
@@ -162,6 +168,50 @@ index 6d3f674..e39ea79 100644
 +	free(wtask);
 +}
 +
++/*
++ * write(), minus the process-wide death sentence.
++ *
++ * The fd being written to is the read end's peer of a pipe the *requesting
++ * client* created, and that client is free to exit at any point during the
++ * transfer. Writing to a pipe with no reader raises SIGPIPE, and weston
++ * installs no handler for it anywhere in its tree, so the default disposition
++ * applies and the whole compositor dies. Block it across the write, and
++ * consume the pending signal if it fired, so the caller sees a plain EPIPE.
++ */
++static ssize_t
++vnc_write_nosigpipe(int fd, const void *data, size_t size)
++{
++	sigset_t sigpipe, previous, pending;
++	ssize_t len;
++	int write_errno;
++
++	sigemptyset(&sigpipe);
++	sigaddset(&sigpipe, SIGPIPE);
++	pthread_sigmask(SIG_BLOCK, &sigpipe, &previous);
++
++	len = write(fd, data, size);
++	write_errno = errno;
++
++	/* Only drain what this write raised. If SIGPIPE was already blocked
++	 * on the way in, a pending one may belong to somebody else. */
++	if (len < 0 && write_errno == EPIPE &&
++	    !sigismember(&previous, SIGPIPE)) {
++		sigemptyset(&pending);
++		if (sigpending(&pending) == 0 &&
++		    sigismember(&pending, SIGPIPE)) {
++			const struct timespec zero = {};
++
++			while (sigtimedwait(&sigpipe, NULL, &zero) < 0 &&
++			       errno == EINTR)
++				;
++		}
++	}
++
++	pthread_sigmask(SIG_SETMASK, &previous, NULL);
++	errno = write_errno;
++	return len;
++}
++
 +/* Feed one requesting client, a pipeful at a time. */
 +static int
 +vnc_clipboard_write_handler(int fd, uint32_t mask, void *data)
@@ -174,15 +224,17 @@ index 6d3f674..e39ea79 100644
 +	while (wtask->offset < wtask->size) {
 +		ssize_t len;
 +
-+		len = write(fd, wtask->data + wtask->offset,
-+			    wtask->size - wtask->offset);
++		len = vnc_write_nosigpipe(fd, wtask->data + wtask->offset,
++					  wtask->size - wtask->offset);
 +		if (len < 0) {
 +			if (errno == EINTR)
 +				continue;
 +			if (errno == EAGAIN)
 +				return 0;
-+			weston_log("VNC: clipboard write failed: %s\n",
-+				   strerror(errno));
++			/* EPIPE just means the requester lost interest. */
++			if (errno != EPIPE)
++				weston_log("VNC: clipboard write failed: %s\n",
++					   strerror(errno));
 +			break;
 +		}
 +		wtask->offset += len;
@@ -205,6 +257,11 @@ index 6d3f674..e39ea79 100644
 +		wl_display_get_event_loop(backend->compositor->wl_display);
 +	struct vnc_clipboard_write *wtask;
 +	int flags;
++
++	if (source->cancelled) {
++		close(fd);
++		return;
++	}
 +
 +	wtask = zalloc(sizeof *wtask);
 +	if (!wtask) {
@@ -240,6 +297,11 @@ index 6d3f674..e39ea79 100644
 +static void
 +vnc_data_source_cancel(struct weston_data_source *base)
 +{
++	struct vnc_data_source *source =
++		container_of(base, struct vnc_data_source, base);
++
++	source->cancelled = true;
++
 +	/*
 +	 * Called from weston_seat_set_selection() while the seat still holds a
 +	 * listener on this source's destroy_signal, and that listener is
@@ -677,7 +739,7 @@ index 6d3f674..e39ea79 100644
  static void
  vnc_new_client(struct nvnc_client *client)
  {
-@@ -996,6 +1605,8 @@ vnc_destroy(struct weston_backend *base)
+@@ -996,6 +1667,8 @@ vnc_destroy(struct weston_backend *base)
  	struct weston_compositor *ec = backend->compositor;
  	struct weston_head *head, *next;
  
@@ -686,7 +748,7 @@ index 6d3f674..e39ea79 100644
  	nvnc_del(backend->server);
  
  	wl_list_remove(&backend->base.link);
-@@ -1228,6 +1839,8 @@ vnc_backend_create(struct weston_compositor *compositor,
+@@ -1228,6 +1901,8 @@ vnc_backend_create(struct weston_compositor *compositor,
  	wl_list_init(&backend->base.link);
  
  	backend->compositor = compositor;
@@ -695,7 +757,7 @@ index 6d3f674..e39ea79 100644
  	backend->base.destroy = vnc_destroy;
  	backend->base.create_output = vnc_create_output;
  	backend->vnc_monitor_refresh_rate = config->refresh_rate * 1000;
-@@ -1325,6 +1938,8 @@ vnc_backend_create(struct weston_compositor *compositor,
+@@ -1325,6 +2000,8 @@ vnc_backend_create(struct weston_compositor *compositor,
  	nvnc_set_userdata(backend->server, backend, NULL);
  	nvnc_set_name(backend->server, "Weston VNC backend");
  
