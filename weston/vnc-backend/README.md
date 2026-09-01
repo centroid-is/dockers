@@ -109,6 +109,84 @@ dark navy with a cursor. Trading a visible hang for a silently wrong image is
 worse than the hang, so it is not what is shipped here. It was not root-caused
 further.
 
+# `0002` — null-checking the cursor state
+
+A second, independent patch to the same file. **This one is hardening, not a
+fix for an observed crash.** It is deliberately not claimed as the cause of
+anything.
+
+## The asymmetry
+
+`vnc_output_update_cursor()` dereferences two pointers that its sibling
+`vnc_output_assign_cursor_plane()` guards:
+
+```c
+pointer = vnc_output_get_pointer(output, &pointer_pnode);   /* may be NULL */
+...
+cursor_surface = output->cursor_surface;                    /* may be NULL  */
+buffer = cursor_surface->buffer_ref.buffer;                 /* vnc.c:599-600 */
+...
+nvnc_set_cursor(..., pointer->hotspot.c.x, ...);            /* vnc.c:614     */
+```
+
+`vnc_output_assign_cursor_plane()` opens with `if (!pointer) return;`.
+`vnc_output_update_cursor()` does not, and never checks `cursor_surface`
+either.
+
+Both can be NULL:
+
+* `vnc_output_get_pointer()` returns NULL when the first peer's seat has no
+  pointer, or when the pointer's sprite is not in the output's z-order list.
+  A newly connected client hits the second case — `vnc_new_client()` does
+  `wl_list_insert(&output->peers, &peer->link)`, inserting at the **head**, so
+  it immediately becomes the peer `vnc_output_get_pointer()` picks, while no
+  sprite has been set for its seat yet.
+* `output->cursor_surface` is assigned in exactly one place, `vnc.c:645` in
+  `vnc_output_assign_cursor_plane()`, and is **never cleared**. It carries no
+  destroy listener. It is NULL until that first succeeds.
+
+What makes it reachable rather than theoretical is that the writer is
+conditional and the reader is not. `vnc_output_repaint()` calls
+`vnc_output_update_cursor()` unconditionally. `vnc_output_assign_planes()`
+only calls `vnc_output_assign_cursor_plane()` while the peer list is non-empty
+**and** `vnc_clients_support_cursor()` is true — and that returns false if
+*any* connected client fails to advertise `RFB_ENCODING_CURSOR`. So a second
+client that does not advertise it stops the refresh while the read continues.
+
+## What was actually observed
+
+Under gdb on the rig, on the real image (weston 16.0.0, neatvnc 1.0.1),
+headless + VNC, breakpoints printing and continuing:
+
+```
+ASSIGN 0x563aa1b1f1e0     (x8, cursor-capable client alone)
+-- second client joins, advertising no cursor encoding --
+DEREF  0x563aa1b1f1e0     (x6, no intervening ASSIGN)
+```
+
+So the stale-read window is real and measurable. It is also self-limiting:
+once the sprite paint node leaves the cursor plane the plane stops taking
+damage, `update_cursor()` returns at its `!update_cursor` check, and the stale
+pointer stops being read. That is very likely why this is not a constant
+crash.
+
+**It was not turned into a crash.** Roughly 120 targeted races — the
+cursor-capable client killed at 0.05s/0.15s/0.30s/0.60s/1.00s after the
+non-cursor client joined — plus mixed stress runs, all under gdb, all
+survived. The NULL-`pointer` path at `vnc.c:614` was reasoned from the source
+and **not** observed firing.
+
+The station's `drm,vnc` mirrored pair — two outputs, two cursor planes, one
+shared sprite view — is the obvious remaining variable and was not tested:
+mirroring needs a real DRM output (`wet_output_compute_output_from_mirror()`
+asserts on `native_mode_copy.width` for a headless one), and that means the
+live compositor.
+
+## Still upstream
+
+Present unchanged in weston `main`; there are no commits to
+`libweston/backend-vnc/` since the `16.0.0` tag at all.
+
 ## Why the module is swapped rather than weston rebuilt
 
 `vnc-backend.so` is a dlopened module, so only it has to be replaced — the
