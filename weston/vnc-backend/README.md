@@ -242,6 +242,132 @@ for a headless one), and that means the live compositor.
 Present unchanged in weston `main`; there are no commits to
 `libweston/backend-vnc/` since the `16.0.0` tag at all.
 
+## `0003` — clipboard bridging
+
+Stock `backend-vnc` implements no clipboard at all, where `backend-rdp` bridges
+MS-RDPECLIP to the seat's selection in `rdpclip.c`:
+
+```
+$ grep -ci clipboard libweston/backend-vnc/vnc.c   # 0
+$ grep -ci clipboard libweston/backend-rdp/rdp.c   # 24
+```
+
+So nothing a client copies reaches a Wayland application, and nothing an
+application copies reaches the client. neatvnc parses the RFB `ClientCutText`
+message perfectly well and then drops it, because weston installs no
+`nvnc_set_cut_text_fn()` handler.
+
+The patch bridges both directions, following `rdpclip.c`:
+
+* a client's cut text becomes a `weston_data_source` published with
+  `weston_seat_set_selection()`, offering `text/plain;charset=utf-8`,
+  `text/plain`, `UTF8_STRING`, `STRING` and `TEXT`;
+* `weston_seat::selection_signal` drives a read of the new selection over a
+  pipe, and the result goes out through `nvnc_send_cut_text()`.
+
+Sources this backend published are recognised by their `accept` callback and
+skipped, so a paste is not echoed straight back at the client that sent it.
+
+Debian's `libneatvnc.so.1` exports both entry points, so nothing outside
+`vnc.c` has to change:
+
+```
+$ nm -D --defined-only /usr/lib/*/libneatvnc.so.1 | grep cut_text
+0000000000009f48 T nvnc_send_cut_text
+000000000000adc8 T nvnc_set_cut_text_fn
+```
+
+### Every seat, not just the peer's
+
+This is the one place the patch deliberately departs from `rdpclip.c`, which
+publishes only on the seat belonging to its own peer.
+
+`vnc_new_client()` creates a fresh `weston_seat` named `VNC Client` when a
+peer connects. The HMI container's `flutter_elinux_wayland` binds its
+`wl_data_device` once, during start-up, to the seats that exist at that moment
+(`elinux_window_wayland.cc`, the `for (auto& [seat, _] : seat_inputs_map_)`
+loop right after the first registry roundtrip). On a station that is the DRM
+backend's seat and nothing else — the VNC peer's seat does not exist yet and
+never gets a data device. A selection published only on the peer seat would be
+invisible to the application it is meant for.
+
+So the patch tracks `weston_compositor::seat_list` plus `seat_created_signal`
+and publishes on all of them. That also means a copy made at the station's own
+keyboard reaches the remote client, not just the other way round.
+
+### Text encoding
+
+RFB 3.8 specifies cut text as latin-1. Clients that negotiate the extended
+clipboard send UTF-8 instead — noVNC does, via `encodeUTF8` in
+`RFB.messages.extendedClipboardProvide` — and neatvnc hands both to the same
+callback unconverted. Incoming text that is not valid UTF-8 is therefore
+treated as latin-1 and converted, which leaves ASCII alone either way.
+Outgoing text is passed through as UTF-8; on the legacy path that is a
+deliberate deviation from the letter of the spec, and the same one every
+client in practice expects.
+
+### What was tested, and what was not
+
+None of this ran on a station. It was exercised in a container on an arm64
+Mac against the image this Dockerfile builds, driven by the two scripts in
+`verify/`. **The station runs `renderer=gl` and a `drm,vnc` pair, and neither
+of those was tested.**
+
+weston ran as `-B headless,vnc --fake-seat`, which reproduces the thing that
+matters: a `default` seat that exists at start-up, plus a `VNC Client` seat
+created later, exactly the split a station has. The Wayland side is
+`wl-copy`/`wl-paste`; `WAYLAND_DEBUG=1` confirms `wl-paste` binds its data
+device to `wl_seat` `"default"`, so every paste below crossed from one seat to
+the other.
+
+| scenario | result |
+|---|---|
+| legacy `ClientCutText` → `wl-paste` | `hello-from-vnc`, on the `default` seat, offering all five mime types |
+| `wl-copy` → legacy `ServerCutText` | exact bytes back at the client |
+| latin-1 in: `fisk\xfeur` | pasted as `fisk\xc3\xbeur` — converted |
+| UTF-8 in: `\xc3\xbe` | pasted as `\xc3\xbe` — not double-encoded |
+| UTF-8 out: `íslenskt-þðáé` | arrives as UTF-8, byte for byte |
+| **extended** clipboard, both directions | `íslenskt-þ` in, `ext-copy-þðá` out, both intact |
+| 512 KiB in and out | 524288 bytes each way, sha256 matching on both sides |
+| 40 selections in a row | all 40 delivered, no drops |
+| client disconnects holding the selection | weston alive, selection still pasteable on `default` |
+| `weston-screenshooter` with a client attached | 1s, `0001`'s fix still holds |
+| `SIGTERM` with a selection live | exit 0 |
+
+The 512 KiB case matters because it is the only one that exercises the partial
+write (the requesting client's pipe fills, `EAGAIN`, and the transfer finishes
+from a `WL_EVENT_WRITABLE` handler) and the multi-read on the way back.
+
+What was **not** tested: `renderer=gl`, a `drm,vnc` pair, a real browser, and
+the actual HMI application. The claim about `flutter_elinux_wayland` above is
+read out of its source, not observed.
+
+### One neatvnc oddity, harmless
+
+`ext_clipboard_save_provide_msg()` writes a length prefix that excludes the
+terminating NUL but a payload that includes it, so a Provide message from the
+server declares 15 bytes and carries 16. Confirmed on the wire here
+(`declared=15 inflated_after_prefix=16 trailing=b'\x00'`). Both readers cope:
+noVNC builds a fresh `Inflator` per message and discards the leftover byte
+(`core/rfb.js`, `_handleExtendedClipboardProvide`), and neatvnc's own receive
+path expects the NUL to be counted. Nothing to do about it here; noted so the
+next person who stares at a hexdump does not chase it.
+
+### A browser still cannot paste with Cmd+V
+
+Worth being blunt about, because the patch does not change it. noVNC 1.7.0 —
+the pinned version in `novnc/Dockerfile` — contains no reference to
+`navigator.clipboard` anywhere in `app/` or `core/`. Its only clipboard route
+is the sidebar panel: a textarea whose `change` event calls
+`UI.clipboardSend()` (`app/ui.js`). So the remote user opens the clipboard
+panel, pastes into it, clicks away for `change` to fire, and only then does the
+text cross. Text coming the other way lands in that same textarea and has to
+be copied out of it by hand.
+
+That is a browser limitation, not a weston one: a page cannot read the system
+clipboard on a keypress without an explicit user gesture and permission, and
+noVNC does not ask for one.
+
 # `0004` — pooling the per-client seats
 
 This is the "empty scene graph at repaint" abort that `0002` ran into and
