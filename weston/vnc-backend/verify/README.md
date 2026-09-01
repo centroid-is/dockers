@@ -25,14 +25,27 @@ backend adds a `VNC Client` seat only when a peer connects — the same split a
 station has between its DRM seat and the remote one, and the reason the patch
 publishes on every seat rather than on the peer's.
 
-The Wayland side needs `wl-clipboard`, which the runtime image does not ship:
+The Wayland side needs `wl-clipboard`, and `retained.sh` also needs
+`abort-reader` compiled from the source beside it. Neither is in the runtime
+image, so build a test image over it:
 
 ```sh
-docker build -t weston-clip-test - <<'EOF'
+docker build -t weston-clip-test -f - . <<'EOF'
 FROM weston-clip
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends wl-clipboard \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       wl-clipboard gcc libc6-dev libwayland-dev wayland-protocols pkg-config \
     && rm -rf /var/lib/apt/lists/*
+COPY abort-reader.c /src/abort-reader.c
+RUN set -eux; \
+    cd /src; \
+    xdg="$(pkg-config --variable=pkgdatadir wayland-protocols)/stable/xdg-shell/xdg-shell.xml"; \
+    wayland-scanner client-header "$xdg" xdg-shell-client-protocol.h; \
+    wayland-scanner private-code "$xdg" xdg-shell-protocol.c; \
+    gcc -O1 -Wall -o /usr/local/bin/abort-reader abort-reader.c \
+        xdg-shell-protocol.c -I. $(pkg-config --cflags --libs wayland-client); \
+    chmod 755 /usr/local/bin/abort-reader
 USER centroid
 EOF
 ```
@@ -84,3 +97,24 @@ and nothing else running under those names.
 sh retained.sh                 # against weston-clip-test
 sh retained.sh some-other-image
 ```
+
+## `abort-reader.c`
+
+The reader `retained.sh` uses for the mid-transfer case, and the reason it
+exists: `wl-paste` reads the whole offer into memory as fast as it arrives, so
+killing it never leaves the compositor holding a half-written pipe — a build
+with no SIGPIPE guard survives every kill delay from 5 ms to 1.5 s. This
+client instead reads continuously, keeping the compositor inside its write
+loop, and then closes its end part-way through, which is the case that raises
+SIGPIPE on the next `write()`.
+
+It maps a real 1x1 `xdg_toplevel` and waits to be configured, because without
+keyboard focus the selection is never offered to it at all. It binds the
+*first* `wl_seat` announced, the way the HMI's embedder does.
+
+```sh
+abort-reader [bytes-before-closing] [mime-type]     # defaults: 1 MiB, text/plain;charset=utf-8
+```
+
+Run it by hand against a large selection to see the difference: on an
+unguarded build the compositor is gone by the time it returns.

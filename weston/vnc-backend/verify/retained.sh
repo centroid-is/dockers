@@ -8,8 +8,8 @@
 #
 #   retained.sh [image]      default image: weston-clip-test
 #
-# Needs a `vnctest` docker network and an image with wl-clipboard in it; see
-# README.md in this directory.
+# Needs a `vnctest` docker network and an image carrying wl-clipboard and the
+# compiled abort-reader; see README.md in this directory.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 IMAGE=${1:-weston-clip-test}
@@ -17,6 +17,9 @@ IMAGE=${1:-weston-clip-test}
 SHORT_HEX=6672612d726967676e756d2dc3bec3b0c3a12d32303236   # 23 bytes, UTF-8
 SHORT_LEN=23
 BIG_LEN=4194304
+# Large enough that the compositor is still writing long after the reader has
+# read its fill, and under neatvnc's 10 MB MAX_CUT_TEXT_SIZE.
+ABORT_LEN=9000000
 
 WEX="docker exec -e XDG_RUNTIME_DIR=/tmp/xdg -e WAYLAND_DISPLAY=wayland-1 --user centroid westonc"
 fail=0
@@ -79,22 +82,25 @@ docker rm -f vncclient >/dev/null 2>&1 || true
 sleep 3
 check "after the client disconnected" "$(paste_len)" "$BIG_LEN"
 
-echo "== a requester that quits mid-transfer must not take weston with it =="
-start_client @$BIG_LEN
+echo "== a reader that closes mid-transfer must not take weston with it =="
+# wl-paste is no use here: it drains the whole offer into memory as fast as it
+# arrives, so killing it never strands a write, and an unguarded build sails
+# through. abort-reader reads continuously and then drops the pipe part-way,
+# which is the case that raises SIGPIPE on the compositor's next write.
+start_client @$ABORT_LEN
 round=0
-while [ $round -lt 6 ]; do
+while [ $round -lt 8 ]; do
   round=$((round + 1))
-  $WEX sh -c 'wl-paste -n > /dev/null & p=$!; sleep 0.02; kill -9 $p 2>/dev/null; true' \
-    >/dev/null 2>&1 || true
+  $WEX abort-reader 262144 >/dev/null 2>&1 || true
   [ "$(weston_alive)" = "running" ] || break
 done
-check "weston after $round kills mid-transfer" "$(weston_alive)" "running"
-docker rm -f vncclient >/dev/null 2>&1 || true
+check "weston after $round readers closed mid-transfer" "$(weston_alive)" "running"
 
 if [ "$(weston_alive)" = "running" ]; then
   sleep 2
-  check "and the selection still reads back whole" "$(paste_len)" "$BIG_LEN"
+  check "and the selection still reads back whole" "$(paste_len)" "$ABORT_LEN"
 fi
+docker rm -f vncclient >/dev/null 2>&1 || true
 
 echo "== the client-facing direction, repeated, must not accumulate =="
 start_weston

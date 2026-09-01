@@ -334,7 +334,7 @@ the other.
 | `weston-screenshooter` with a client attached | 1s, `0001`'s fix still holds |
 | `SIGTERM` with a selection live | exit 0 |
 | retained selection, 23 B and 4 MiB, pasted repeatedly | exact byte count every time |
-| requester killed mid-transfer, 6 rounds | weston alive, selection still whole |
+| reader closing mid-transfer, 8 rounds | weston alive, selection still whole |
 | three copies in a row, client side | one distinct `ServerCutText` length |
 
 The last three rows are `verify/retained.sh`, which asserts byte **counts**
@@ -365,8 +365,10 @@ $
 
 weston installs no handler for it anywhere, so the default disposition
 applies and the entire compositor dies — exit 141, one line of `Broken pipe`,
-every client taken down with it. This was seen once during development, as a
-container exiting 141 immediately after a clipboard transfer.
+every client taken down with it. This was seen during development as a container
+exiting 141 immediately after a clipboard transfer, and independently on the
+hq rig under `weston:pr-14`, where it killed the compositor and every client
+with it.
 
 So the write goes through `vnc_write_nosigpipe()`, which blocks SIGPIPE across
 the `write()` and consumes the pending signal if it fired, leaving the caller
@@ -374,12 +376,21 @@ with a plain `EPIPE` to handle. `backend-rdp` has the same exposure in
 `clipboard_data_source_write()` and no such guard; its clipboard is just
 exercised far less.
 
-Honest caveat: no deterministic reproducer was built for this. `wl-paste`
-drains the pipe into memory as fast as it arrives, so killing it mid-transfer
-does not leave a write stranded — `verify/retained.sh` does six rounds of
-exactly that and the *unguarded* build survives them too. The guard is here
-because the failure mode is real, cheap to prevent and catastrophic when it
-lands, not because a test demonstrates it.
+It reproduces on demand, but not with `wl-paste`: that drains the whole offer
+into memory as fast as it arrives, so killing it mid-transfer never leaves a
+write stranded, and an unguarded build sails through nine different kill
+delays from 5 ms to 1.5 s. What is needed is a reader that keeps reading —
+holding the compositor inside its write loop — and then drops the pipe
+part-way. That is `verify/abort-reader.c`, and against a 9 MB selection:
+
+| build | result |
+|---|---|
+| before the guard | **weston exit 141, `Broken pipe`, on the first round** |
+| after | 8 rounds, weston alive, selection still reads back whole |
+
+`verify/retained.sh` fails on the unguarded build and passes on the guarded
+one, so it is a real regression test rather than one that happens to pass
+either way.
 
 ### One neatvnc oddity, harmless
 
