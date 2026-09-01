@@ -6,9 +6,9 @@
 # runtime image installs, drop our file over the stock one, and build just the
 # weston-keyboard target.
 # =============================================================================
-FROM debian:trixie-slim AS keyboard-builder
+FROM debian:forky-slim AS keyboard-builder
 
-ARG WESTON_VERSION=14.0.2
+ARG WESTON_VERSION=16.0.0
 
 # build-dep on the distro's own weston package pulls exactly the set this
 # source tree expects — hand-listing the -dev packages drifts with every
@@ -31,7 +31,7 @@ RUN cd /src/weston \
        -Dbackend-default=headless \
        -Dbackend-drm=false -Dbackend-rdp=false -Dbackend-vnc=false \
        -Dbackend-pipewire=false -Dbackend-x11=false \
-       -Dxwayland=false -Dremoting=false -Dpipewire=false \
+       -Dxwayland=false -Ddeprecated-remoting=false -Ddeprecated-pipewire=false \
        -Dtests=false -Ddoc=false \
     && ninja -C build clients/weston-keyboard
 
@@ -41,11 +41,12 @@ RUN cd /src/weston \
 # Debian's neatvnc offers a browser client no security type it can use, so the
 # only overlap with noVNC is Apple DH — unauthenticated Diffie-Hellman. The
 # patch adds RA2ne (types 6 and 130), which hands the client the server's RSA
-# key to verify instead. See neatvnc/README.md.
+# key to verify instead. Still absent from upstream 1.0.1, so the stage stays.
+# See neatvnc/README.md.
 # =============================================================================
-FROM debian:trixie-slim AS neatvnc-builder
+FROM debian:forky-slim AS neatvnc-builder
 
-ARG NEATVNC_VERSION=v0.9.1
+ARG NEATVNC_VERSION=v1.0.1
 
 # As with the keyboard stage, build-dep on the distro package rather than
 # hand-listing -dev packages that drift between releases.
@@ -70,7 +71,7 @@ RUN cd /src/neatvnc \
 # =============================================================================
 # Stage 3: runtime
 # =============================================================================
-FROM debian:trixie-slim
+FROM debian:forky-slim
 ARG SEAT_GID=995
 
 RUN apt-get update \
@@ -90,18 +91,26 @@ RUN chmod 755 /usr/local/bin/centroidx-keyboard
 
 # The patched libneatvnc, over Debian's copy. Weston itself is not rebuilt:
 # the patch adds no symbols and changes nothing that crosses the ABI.
-COPY --from=neatvnc-builder /src/neatvnc/build/libneatvnc.so.0 /tmp/libneatvnc.so.0
+COPY --from=neatvnc-builder /src/neatvnc/build/libneatvnc.so.1 /tmp/libneatvnc.so.1
 RUN set -eux; \
-    target=$(ls /usr/lib/*/libneatvnc.so.0); \
+    target=$(ls /usr/lib/*/libneatvnc.so.1); \
     test -f "$target"; \
-    cp /tmp/libneatvnc.so.0 "$target"; \
-    rm /tmp/libneatvnc.so.0; \
+    cp /tmp/libneatvnc.so.1 "$target"; \
+    rm /tmp/libneatvnc.so.1; \
     ldconfig
 
 # 3. Copy in your weston.ini
 #    ensure config dir exists
 RUN mkdir -p /home/centroid/.config
 COPY weston.ini /home/centroid/.config/weston.ini
+
+# weston.ini's mirror-of key needs the station's own DRM connector name, so it
+# ships as a placeholder and is resolved at start-up. The resolver is installed
+# as `weston`, ahead of /usr/bin/weston on PATH, so the `exec weston -c ...`
+# entrypoint every station already has in its docker-compose.yml keeps working
+# unchanged.
+COPY weston-wrapper.sh /usr/local/bin/weston
+RUN chmod 755 /usr/local/bin/weston
 
 # Generate self-signed certs for VNC
 RUN mkdir -p /home/centroid/vnc/certs \
