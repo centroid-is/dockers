@@ -111,9 +111,12 @@ further.
 
 # `0002` — null-checking the cursor state
 
-A second, independent patch to the same file. **This one is hardening, not a
-fix for an observed crash.** It is deliberately not claimed as the cause of
-anything.
+A second, independent patch to the same file. It began as hardening. It is now
+a **demonstrated fix for a reproduced SIGSEGV** — see "Reproduced" below.
+
+It is **not** sufficient on its own: with it applied, the same load runs far
+longer and then aborts on a *different* bug, in libweston rather than the
+backend. Both are documented below.
 
 ## The asymmetry
 
@@ -170,17 +173,69 @@ damage, `update_cursor()` returns at its `!update_cursor` check, and the stale
 pointer stops being read. That is very likely why this is not a constant
 crash.
 
-**It was not turned into a crash.** Roughly 120 targeted races — the
-cursor-capable client killed at 0.05s/0.15s/0.30s/0.60s/1.00s after the
-non-cursor client joined — plus mixed stress runs, all under gdb, all
-survived. The NULL-`pointer` path at `vnc.c:614` was reasoned from the source
-and **not** observed firing.
+## Reproduced
+
+Two clients was the wrong shape. Production runs **many** concurrent sessions,
+and with a mixed population `vnc_clients_support_cursor()` does not flip once —
+it *flaps*, because it is false whenever any one client lacks the encoding.
+
+Load: ~20 concurrent sessions, continuous churn, roughly one client in three
+advertising `RFB_ENCODING_CURSOR`, one in nine stalling mid-handshake, and one
+in seventeen connecting `shared=0` (which makes neatvnc's `on_init_message`
+call `disconnect_all_other_clients()`, tearing down every other seat at once).
+Run natively under gdb on weston 16.0.0 + neatvnc 1.0.1, headless + VNC.
+
+It segfaults in about two minutes, twice out of two runs:
+
+```
+Thread 1 "weston" received signal SIGSEGV, Segmentation fault.
+#0  vnc_output_update_cursor (output=0x…) at ../libweston/backend-vnc/vnc.c:615
+        pointer = 0x0
+        pointer_pnode = 0x0
+        update_cursor = true
+        cursor_surface = 0x55e4eae65d90
+        buffer = 0x55e4eadf1b90
+#1  vnc_output_repaint (base=0x…) at ../libweston/backend-vnc/vnc.c:1078
+#2  weston_output_repaint (…) at ../libweston/compositor.c:4010
+#3  output_repaint_timer_handler (…) at ../libweston/compositor.c:4454
+```
+
+So it is the **NULL `pointer`** path, not the stale-`cursor_surface` one:
+`cursor_surface` and `buffer` are both valid, and `vnc_output_get_pointer()`
+returned NULL while the cursor plane had damage. That is precisely the case
+`vnc_output_assign_cursor_plane()` guards with `if (!pointer) return;` and
+this function did not.
+
+(Line 615 rather than 614 because `0001` adds an include above it.)
+
+## Does this patch fix it?
+
+Yes, for that crash. Same load, same harness, module rebuilt with this patch:
+the SIGSEGV does not recur — 919 sessions in one run and 323 in another, 1242
+total, with zero occurrences.
+
+**But weston still dies**, later, on a different and unrelated failure:
+
+```
+weston: ../libweston/compositor.c:3950: weston_output_repaint:
+  Assertion `!wl_list_empty(&output->paint_node_z_order_list) &&
+             "empty scene graph at repaint"' failed.
+```
+
+That is an abort (SIGABRT) in **libweston core**, not in the backend, so
+swapping `vnc-backend.so` cannot address it — it needs an upstream fix or a
+weston rebuild. It reproduced in both runs with this patch applied. It is
+almost certainly pre-existing and merely masked before, since the segfault
+arrived first and this patch only adds early returns to
+`vnc_output_update_cursor()` — it cannot add or remove paint nodes. That
+reasoning has not been separately proven.
+
+## Still not tested
 
 The station's `drm,vnc` mirrored pair — two outputs, two cursor planes, one
-shared sprite view — is the obvious remaining variable and was not tested:
-mirroring needs a real DRM output (`wet_output_compute_output_from_mirror()`
-asserts on `native_mode_copy.width` for a headless one), and that means the
-live compositor.
+shared sprite view. Mirroring needs a real DRM output
+(`wet_output_compute_output_from_mirror()` asserts on `native_mode_copy.width`
+for a headless one), and that means the live compositor.
 
 ## Still upstream
 
