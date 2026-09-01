@@ -299,9 +299,8 @@ remote client, not just the other way round.
 The peer-seat exception is not a detail; publishing there caused a real bug.
 A selection is per seat, so a client holding a `wl_data_device` on more than
 one seat is offered the same text once per seat, and a client that reads all
-of its offers ends up with the payload repeated once for each. That was
-observed on the rig as a 23-byte copy pasting back as 46 bytes, and it
-reproduces exactly:
+of its offers ends up with the payload repeated once for each. It scales with
+the seat count — two seats give twice the payload, three give three times:
 
 ```
 $ multiseat-reader                  # before
@@ -313,6 +312,17 @@ seats=2 offers=1 total=23
   seat[0] default     offer=yes
   seat[1] VNC Client  offer=no
 ```
+
+**What this does not explain.** A 23-byte copy was seen pasting back as 46
+bytes on the rig, measured with plain `wl-paste`, and that is *not* this bug.
+`wl-clipboard` 2.3.0 binds a single seat — with two seats present it sees both
+`wl_seat` globals but makes one `get_data_device` call, receives one
+`selection` event and issues one `receive` (checked under `WAYLAND_DEBUG=1`).
+Against the unpatched build in a two-seat setup it returns 23 bytes, before
+and after the publishing client disconnects, and still 23 with three seats,
+with five publishes in a row, and with two peers connected at once. So
+something else produced that 46, and it is still open. The fix below is worth
+having on its own merits; it should not be taken as having closed that.
 
 Skipping the peer's own seat costs nothing worth having: the text just came
 *from* that peer, and the seat is created when the peer connects — long after
