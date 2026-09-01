@@ -292,8 +292,37 @@ never gets a data device. A selection published only on the peer seat would be
 invisible to the application it is meant for.
 
 So the patch tracks `weston_compositor::seat_list` plus `seat_created_signal`
-and publishes on all of them. That also means a copy made at the station's own
-keyboard reaches the remote client, not just the other way round.
+and publishes on all of them — **except the seats it created for its own
+peers**. That also means a copy made at the station's own keyboard reaches the
+remote client, not just the other way round.
+
+The peer-seat exception is not a detail; publishing there caused a real bug.
+A selection is per seat, so a client holding a `wl_data_device` on more than
+one seat is offered the same text once per seat, and a client that reads all
+of its offers ends up with the payload repeated once for each. That was
+observed on the rig as a 23-byte copy pasting back as 46 bytes, and it
+reproduces exactly:
+
+```
+$ multiseat-reader                  # before
+seats=2 offers=2 total=46
+  seat[0] default     offer=yes
+  seat[1] VNC Client  offer=yes
+$ multiseat-reader                  # after
+seats=2 offers=1 total=23
+  seat[0] default     offer=yes
+  seat[1] VNC Client  offer=no
+```
+
+Skipping the peer's own seat costs nothing worth having: the text just came
+*from* that peer, and the seat is created when the peer connects — long after
+the clients that want to paste have bound their data devices to whatever seat
+existed then. On a station that leaves exactly one seat carrying the
+selection, the DRM one, which is the seat the HMI is listening on.
+
+The one thing it gives up is a Wayland client that binds a data device *only*
+to a VNC peer's seat, having started after that peer connected. Such a client
+would not be offered the text. Nothing on a station does this.
 
 ### Text encoding
 
@@ -335,6 +364,7 @@ the other.
 | `SIGTERM` with a selection live | exit 0 |
 | retained selection, 23 B and 4 MiB, pasted repeatedly | exact byte count every time |
 | reader closing mid-transfer, 8 rounds | weston alive, selection still whole |
+| a client with a data device on every seat | one copy, not one per seat |
 | three copies in a row, client side | one distinct `ServerCutText` length |
 
 The last three rows are `verify/retained.sh`, which asserts byte **counts**
@@ -390,7 +420,7 @@ part-way. That is `verify/abort-reader.c`, and against a 9 MB selection:
 
 `verify/retained.sh` fails on the unguarded build and passes on the guarded
 one, so it is a real regression test rather than one that happens to pass
-either way.
+either way. It catches the per-seat duplication the same way.
 
 ### One neatvnc oddity, harmless
 

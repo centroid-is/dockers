@@ -1,4 +1,4 @@
-From ff1de585d53e63593183be6214dd3dab025e97f5 Mon Sep 17 00:00:00 2001
+From f59689bb9e96e11e00b869426a1c8c68d832ba0a Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?J=C3=B3n=20Bjarni=20Bjarnason?= <jon@centroid.is>
 Date: Tue, 1 Sep 2026 14:45:48 +0000
 Subject: [PATCH] vnc: bridge the clipboard between RFB cut text and the
@@ -33,11 +33,11 @@ extended clipboard send UTF-8, and neatvnc passes both through
 unconverted. Incoming text that is not valid UTF-8 is therefore treated
 as latin-1 and converted, which leaves ASCII alone either way.
 ---
- libweston/backend-vnc/vnc.c | 677 ++++++++++++++++++++++++++++++++++++
- 1 file changed, 677 insertions(+)
+ libweston/backend-vnc/vnc.c | 702 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 702 insertions(+)
 
 diff --git a/libweston/backend-vnc/vnc.c b/libweston/backend-vnc/vnc.c
-index 6d3f674..70f4105 100644
+index 6d3f674..ae74187 100644
 --- a/libweston/backend-vnc/vnc.c
 +++ b/libweston/backend-vnc/vnc.c
 @@ -34,6 +34,9 @@
@@ -50,7 +50,7 @@ index 6d3f674..70f4105 100644
  #include <linux/input.h>
  #include <netinet/in.h>
  #include <pwd.h>
-@@ -78,6 +81,12 @@ struct vnc_backend {
+@@ -78,6 +81,15 @@ struct vnc_backend {
  
  	const struct pixel_format_info **formats;
  	unsigned int formats_count;
@@ -60,10 +60,13 @@ index 6d3f674..70f4105 100644
 +	struct wl_list clipboard_writes;
 +	struct vnc_clipboard_read *clipboard_read;
 +	struct wl_listener seat_created_listener;
++	/* Set only while vnc_new_client() is inside weston_seat_init(), so
++	 * the seat_created_signal it raises can be recognised as ours. */
++	bool creating_peer_seat;
  };
  
  struct vnc_output {
-@@ -104,6 +113,47 @@ struct vnc_peer {
+@@ -104,6 +116,50 @@ struct vnc_peer {
  	struct wl_list link;
  };
  
@@ -83,6 +86,9 @@ index 6d3f674..70f4105 100644
 +struct vnc_clipboard_seat {
 +	struct vnc_backend *backend;
 +	struct weston_seat *seat;
++	/* A seat this backend created for one of its own peers, rather than
++	 * one that belongs to the rest of the compositor. */
++	bool is_peer_seat;
 +	/* The source last published here; owned, freed when superseded. */
 +	struct vnc_data_source *source;
 +	struct wl_listener selection_listener;
@@ -111,7 +117,7 @@ index 6d3f674..70f4105 100644
  struct vnc_head {
  	struct weston_head base;
  };
-@@ -788,6 +838,627 @@ vnc_update_buffer(struct nvnc_display *display, struct pixman_region32 *damage)
+@@ -788,6 +844,644 @@ vnc_update_buffer(struct nvnc_display *display, struct pixman_region32 *damage)
  	pixman_region_fini(&nvnc_damage);
  }
  
@@ -488,9 +494,24 @@ index 6d3f674..70f4105 100644
 +					"clipboard: %zu bytes from client\n",
 +					size);
 +
-+	wl_list_for_each(cseat, &backend->clipboard_seats, link)
++	/*
++	 * Every seat except the ones this backend made for its own peers.
++	 *
++	 * The text is one clipboard, but a selection is per seat, so a client
++	 * holding a wl_data_device on more than one seat is offered it once
++	 * per seat — and a client that reads them all ends up with the
++	 * payload repeated, once for each. Publishing on a peer's own seat
++	 * buys nothing to weigh against that: the text just came *from* that
++	 * peer, and the seat is created when the peer connects, long after
++	 * the clients that want to paste have bound their data devices to
++	 * whatever seat existed then.
++	 */
++	wl_list_for_each(cseat, &backend->clipboard_seats, link) {
++		if (cseat->is_peer_seat)
++			continue;
 +		vnc_clipboard_set_selection(cseat, converted ? converted : text,
 +					    size);
++	}
 +
 +	free(converted);
 +}
@@ -669,7 +690,8 @@ index 6d3f674..70f4105 100644
 +}
 +
 +static void
-+vnc_clipboard_track_seat(struct vnc_backend *backend, struct weston_seat *seat)
++vnc_clipboard_track_seat(struct vnc_backend *backend, struct weston_seat *seat,
++			 bool is_peer_seat)
 +{
 +	struct vnc_clipboard_seat *cseat;
 +
@@ -679,6 +701,7 @@ index 6d3f674..70f4105 100644
 +
 +	cseat->backend = backend;
 +	cseat->seat = seat;
++	cseat->is_peer_seat = is_peer_seat;
 +
 +	cseat->selection_listener.notify = vnc_clipboard_selection;
 +	wl_signal_add(&seat->selection_signal, &cseat->selection_listener);
@@ -696,7 +719,7 @@ index 6d3f674..70f4105 100644
 +		container_of(listener, struct vnc_backend,
 +			     seat_created_listener);
 +
-+	vnc_clipboard_track_seat(backend, data);
++	vnc_clipboard_track_seat(backend, data, backend->creating_peer_seat);
 +}
 +
 +static void
@@ -711,7 +734,7 @@ index 6d3f674..70f4105 100644
 +		      &backend->seat_created_listener);
 +
 +	wl_list_for_each(seat, &backend->compositor->seat_list, link)
-+		vnc_clipboard_track_seat(backend, seat);
++		vnc_clipboard_track_seat(backend, seat, false);
 +}
 +
 +static void
@@ -739,7 +762,17 @@ index 6d3f674..70f4105 100644
  static void
  vnc_new_client(struct nvnc_client *client)
  {
-@@ -996,6 +1667,8 @@ vnc_destroy(struct weston_backend *base)
+@@ -804,7 +1498,9 @@ vnc_new_client(struct nvnc_client *client)
+ 	peer->backend = backend;
+ 	peer->seat = xzalloc(sizeof(*peer->seat));
+ 
++	backend->creating_peer_seat = true;
+ 	weston_seat_init(peer->seat, backend->compositor, seat_name);
++	backend->creating_peer_seat = false;
+ 	weston_seat_init_pointer(peer->seat);
+ 	weston_seat_init_keyboard(peer->seat, backend->xkb_keymap);
+ 
+@@ -996,6 +1692,8 @@ vnc_destroy(struct weston_backend *base)
  	struct weston_compositor *ec = backend->compositor;
  	struct weston_head *head, *next;
  
@@ -748,7 +781,7 @@ index 6d3f674..70f4105 100644
  	nvnc_del(backend->server);
  
  	wl_list_remove(&backend->base.link);
-@@ -1228,6 +1901,8 @@ vnc_backend_create(struct weston_compositor *compositor,
+@@ -1228,6 +1926,8 @@ vnc_backend_create(struct weston_compositor *compositor,
  	wl_list_init(&backend->base.link);
  
  	backend->compositor = compositor;
@@ -757,7 +790,7 @@ index 6d3f674..70f4105 100644
  	backend->base.destroy = vnc_destroy;
  	backend->base.create_output = vnc_create_output;
  	backend->vnc_monitor_refresh_rate = config->refresh_rate * 1000;
-@@ -1325,6 +2000,8 @@ vnc_backend_create(struct weston_compositor *compositor,
+@@ -1325,6 +2025,8 @@ vnc_backend_create(struct weston_compositor *compositor,
  	nvnc_set_userdata(backend->server, backend, NULL);
  	nvnc_set_name(backend->server, "Weston VNC backend");
  

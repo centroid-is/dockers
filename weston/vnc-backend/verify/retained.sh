@@ -102,6 +102,17 @@ if [ "$(weston_alive)" = "running" ]; then
 fi
 docker rm -f vncclient >/dev/null 2>&1 || true
 
+echo "== a client with a data device on every seat gets one copy, not one each =="
+start_weston
+start_client $SHORT_HEX
+out=$($WEX multiseat-reader 2>&1 || true)
+echo "  $(echo "$out" | head -1)"
+seats=$(echo "$out" | sed -n 's/^seats=\([0-9]*\).*/\1/p')
+total=$(echo "$out" | sed -n 's/.*total=\([0-9]*\).*/\1/p')
+check "seats present" "$seats" "2"
+check "bytes read across all of them" "$total" "$SHORT_LEN"
+docker rm -f vncclient >/dev/null 2>&1 || true
+
 echo "== the client-facing direction, repeated, must not accumulate =="
 start_weston
 start_client ""

@@ -37,15 +37,17 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        wl-clipboard gcc libc6-dev libwayland-dev wayland-protocols pkg-config \
     && rm -rf /var/lib/apt/lists/*
-COPY abort-reader.c /src/abort-reader.c
+COPY abort-reader.c multiseat-reader.c /src/
 RUN set -eux; \
     cd /src; \
     xdg="$(pkg-config --variable=pkgdatadir wayland-protocols)/stable/xdg-shell/xdg-shell.xml"; \
     wayland-scanner client-header "$xdg" xdg-shell-client-protocol.h; \
     wayland-scanner private-code "$xdg" xdg-shell-protocol.c; \
-    gcc -O1 -Wall -o /usr/local/bin/abort-reader abort-reader.c \
-        xdg-shell-protocol.c -I. $(pkg-config --cflags --libs wayland-client); \
-    chmod 755 /usr/local/bin/abort-reader
+    for tool in abort-reader multiseat-reader; do \
+      gcc -O1 -Wall -o "/usr/local/bin/$tool" "$tool.c" xdg-shell-protocol.c \
+          -I. $(pkg-config --cflags --libs wayland-client); \
+      chmod 755 "/usr/local/bin/$tool"; \
+    done
 USER centroid
 EOF
 ```
@@ -118,3 +120,20 @@ abort-reader [bytes-before-closing] [mime-type]     # defaults: 1 MiB, text/plai
 
 Run it by hand against a large selection to see the difference: on an
 unguarded build the compositor is gone by the time it returns.
+
+## `multiseat-reader.c`
+
+Holds a `wl_data_device` on *every* seat, takes an offer from each, reads them
+all into one pipe, and reports the total. It exists because publishing the
+selection on every seat — which the patch has to do, so the HMI sees it —
+offers the same text once per seat, and a client that reads all of its offers
+gets the payload repeated. That is the 23-bytes-pasting-as-46 bug.
+
+```sh
+multiseat-reader [mime-type]
+seats=2 offers=1 total=23      # right: only the non-peer seat carries it
+seats=2 offers=2 total=46      # wrong: one copy per seat
+```
+
+Like `abort-reader` it maps a 1x1 `xdg_toplevel` first, since without keyboard
+focus no selection is offered to it at all.
