@@ -1,12 +1,11 @@
 # =============================================================================
-# Stage 1: build the CentroidX on-screen keyboard
+# Stage 1: the weston source tree both weston stages build out of
 #
-# keyboard/keyboard.c is a fork of weston's own clients/keyboard.c, so it is
-# built inside the matching weston source tree: check out the same version the
-# runtime image installs, drop our file over the stock one, and build just the
-# weston-keyboard target.
+# Two artifacts are built from weston's own sources — the forked on-screen
+# keyboard and the patched VNC backend — so the checkout and the build
+# dependencies are shared rather than installed twice.
 # =============================================================================
-FROM debian:forky-slim AS keyboard-builder
+FROM debian:forky-slim AS weston-src
 
 ARG WESTON_VERSION=16.0.0
 
@@ -22,6 +21,16 @@ RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.s
 RUN git clone --depth 1 --branch ${WESTON_VERSION} \
     https://gitlab.freedesktop.org/wayland/weston.git /src/weston
 
+
+# =============================================================================
+# Stage 1a: build the CentroidX on-screen keyboard
+#
+# keyboard/keyboard.c is a fork of weston's own clients/keyboard.c, so it is
+# built inside the matching weston source tree: drop our file over the stock
+# one and build just the weston-keyboard target.
+# =============================================================================
+FROM weston-src AS keyboard-builder
+
 COPY keyboard/keyboard.c /src/weston/clients/keyboard.c
 
 # Only the client is wanted; every backend is disabled so the build stays
@@ -34,6 +43,33 @@ RUN cd /src/weston \
        -Dxwayland=false -Ddeprecated-remoting=false -Ddeprecated-pipewire=false \
        -Dtests=false -Ddoc=false \
     && ninja -C build clients/weston-keyboard
+
+
+# =============================================================================
+# Stage 1b: build the VNC backend with output capture serviced
+#
+# Stock weston never services a screen-capture task filed against the VNC
+# output, and aborts the whole compositor on the assert that catches it. The
+# patch is two guards in vnc_output_repaint(), both of them lifted from what
+# backend-drm and backend-pipewire already do; see vnc-backend/README.md.
+#
+# Only vnc-backend.so is taken, over Debian's copy of the same module, the way
+# the patched libneatvnc is. It links against libweston's *private* ABI, so it
+# has to be built from the same sources the runtime image installs: same
+# 16.0.0 tag, same debian:forky-slim, and the meson options Debian itself
+# configures with (debian/rules) so config.h comes out identical.
+# =============================================================================
+FROM weston-src AS vnc-backend-builder
+
+COPY vnc-backend/*.patch /patches/
+
+RUN cd /src/weston \
+    && git apply --check /patches/*.patch \
+    && git apply /patches/*.patch \
+    && meson setup build \
+       -Dbackend-rdp=true -Dbackend-vnc=true -Drenderer-vulkan=true \
+       -Dsystemd=true -Ddoc=false \
+    && ninja -C build libweston/backend-vnc/vnc-backend.so
 
 # =============================================================================
 # Stage 2: build neatvnc with the RA2ne security types
@@ -98,6 +134,17 @@ RUN set -eux; \
     cp /tmp/libneatvnc.so.1 "$target"; \
     rm /tmp/libneatvnc.so.1; \
     ldconfig
+
+# The patched vnc-backend.so, over Debian's copy of the same module. Without
+# it, any weston-screenshooter run aborts the compositor: it captures every
+# output, and nothing on the VNC output ever services the task.
+COPY --from=vnc-backend-builder \
+     /src/weston/build/libweston/backend-vnc/vnc-backend.so /tmp/vnc-backend.so
+RUN set -eux; \
+    target=$(ls /usr/lib/*/libweston-16/vnc-backend.so); \
+    test -f "$target"; \
+    cp /tmp/vnc-backend.so "$target"; \
+    rm /tmp/vnc-backend.so
 
 # 3. Copy in your weston.ini
 #    ensure config dir exists
