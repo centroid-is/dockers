@@ -109,6 +109,139 @@ dark navy with a cursor. Trading a visible hang for a silently wrong image is
 worse than the hang, so it is not what is shipped here. It was not root-caused
 further.
 
+# `0002` — null-checking the cursor state
+
+A second, independent patch to the same file. It began as hardening. It is now
+a **demonstrated fix for a reproduced SIGSEGV** — see "Reproduced" below.
+
+It is **not** sufficient on its own: with it applied, the same load runs far
+longer and then aborts on a *different* bug, in libweston rather than the
+backend. Both are documented below.
+
+## The asymmetry
+
+`vnc_output_update_cursor()` dereferences two pointers that its sibling
+`vnc_output_assign_cursor_plane()` guards:
+
+```c
+pointer = vnc_output_get_pointer(output, &pointer_pnode);   /* may be NULL */
+...
+cursor_surface = output->cursor_surface;                    /* may be NULL  */
+buffer = cursor_surface->buffer_ref.buffer;                 /* vnc.c:599-600 */
+...
+nvnc_set_cursor(..., pointer->hotspot.c.x, ...);            /* vnc.c:614     */
+```
+
+`vnc_output_assign_cursor_plane()` opens with `if (!pointer) return;`.
+`vnc_output_update_cursor()` does not, and never checks `cursor_surface`
+either.
+
+Both can be NULL:
+
+* `vnc_output_get_pointer()` returns NULL when the first peer's seat has no
+  pointer, or when the pointer's sprite is not in the output's z-order list.
+  A newly connected client hits the second case — `vnc_new_client()` does
+  `wl_list_insert(&output->peers, &peer->link)`, inserting at the **head**, so
+  it immediately becomes the peer `vnc_output_get_pointer()` picks, while no
+  sprite has been set for its seat yet.
+* `output->cursor_surface` is assigned in exactly one place, `vnc.c:645` in
+  `vnc_output_assign_cursor_plane()`, and is **never cleared**. It carries no
+  destroy listener. It is NULL until that first succeeds.
+
+What makes it reachable rather than theoretical is that the writer is
+conditional and the reader is not. `vnc_output_repaint()` calls
+`vnc_output_update_cursor()` unconditionally. `vnc_output_assign_planes()`
+only calls `vnc_output_assign_cursor_plane()` while the peer list is non-empty
+**and** `vnc_clients_support_cursor()` is true — and that returns false if
+*any* connected client fails to advertise `RFB_ENCODING_CURSOR`. So a second
+client that does not advertise it stops the refresh while the read continues.
+
+## What was actually observed
+
+Under gdb on the rig, on the real image (weston 16.0.0, neatvnc 1.0.1),
+headless + VNC, breakpoints printing and continuing:
+
+```
+ASSIGN 0x563aa1b1f1e0     (x8, cursor-capable client alone)
+-- second client joins, advertising no cursor encoding --
+DEREF  0x563aa1b1f1e0     (x6, no intervening ASSIGN)
+```
+
+So the stale-read window is real and measurable. It is also self-limiting:
+once the sprite paint node leaves the cursor plane the plane stops taking
+damage, `update_cursor()` returns at its `!update_cursor` check, and the stale
+pointer stops being read. That is very likely why this is not a constant
+crash.
+
+## Reproduced
+
+Two clients was the wrong shape. Production runs **many** concurrent sessions,
+and with a mixed population `vnc_clients_support_cursor()` does not flip once —
+it *flaps*, because it is false whenever any one client lacks the encoding.
+
+Load: ~20 concurrent sessions, continuous churn, roughly one client in three
+advertising `RFB_ENCODING_CURSOR`, one in nine stalling mid-handshake, and one
+in seventeen connecting `shared=0` (which makes neatvnc's `on_init_message`
+call `disconnect_all_other_clients()`, tearing down every other seat at once).
+Run natively under gdb on weston 16.0.0 + neatvnc 1.0.1, headless + VNC.
+
+It segfaults in about two minutes, twice out of two runs:
+
+```
+Thread 1 "weston" received signal SIGSEGV, Segmentation fault.
+#0  vnc_output_update_cursor (output=0x…) at ../libweston/backend-vnc/vnc.c:615
+        pointer = 0x0
+        pointer_pnode = 0x0
+        update_cursor = true
+        cursor_surface = 0x55e4eae65d90
+        buffer = 0x55e4eadf1b90
+#1  vnc_output_repaint (base=0x…) at ../libweston/backend-vnc/vnc.c:1078
+#2  weston_output_repaint (…) at ../libweston/compositor.c:4010
+#3  output_repaint_timer_handler (…) at ../libweston/compositor.c:4454
+```
+
+So it is the **NULL `pointer`** path, not the stale-`cursor_surface` one:
+`cursor_surface` and `buffer` are both valid, and `vnc_output_get_pointer()`
+returned NULL while the cursor plane had damage. That is precisely the case
+`vnc_output_assign_cursor_plane()` guards with `if (!pointer) return;` and
+this function did not.
+
+(Line 615 rather than 614 because `0001` adds an include above it.)
+
+## Does this patch fix it?
+
+Yes, for that crash. Same load, same harness, module rebuilt with this patch:
+the SIGSEGV does not recur — 919 sessions in one run and 323 in another, 1242
+total, with zero occurrences.
+
+**But weston still dies**, later, on a different and unrelated failure:
+
+```
+weston: ../libweston/compositor.c:3950: weston_output_repaint:
+  Assertion `!wl_list_empty(&output->paint_node_z_order_list) &&
+             "empty scene graph at repaint"' failed.
+```
+
+That is an abort (SIGABRT) in **libweston core**, not in the backend, so
+swapping `vnc-backend.so` cannot address it — it needs an upstream fix or a
+weston rebuild. It reproduced in both runs with this patch applied. It is
+almost certainly pre-existing and merely masked before, since the segfault
+arrived first and this patch only adds early returns to
+`vnc_output_update_cursor()` — it cannot add or remove paint nodes. That
+reasoning has not been separately proven.
+
+## Still not tested
+
+The station's `drm,vnc` mirrored pair — two outputs, two cursor planes, one
+shared sprite view. Mirroring needs a real DRM output
+(`wet_output_compute_output_from_mirror()` asserts on `native_mode_copy.width`
+for a headless one), and that means the live compositor.
+
+## Still upstream
+
+Present unchanged in weston `main`; there are no commits to
+`libweston/backend-vnc/` since the `16.0.0` tag at all.
+
 ## Why the module is swapped rather than weston rebuilt
 
 `vnc-backend.so` is a dlopened module, so only it has to be replaced — the

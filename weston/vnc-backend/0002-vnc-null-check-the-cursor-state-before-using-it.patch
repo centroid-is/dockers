@@ -1,0 +1,77 @@
+From 354bc8bfa8cbaa2a85eba2d9b5b9974a5052499a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B3n=20Bjarni=20Bjarnason?= <jon@centroid.is>
+Date: Tue, 1 Sep 2026 16:26:49 +0000
+Subject: [PATCH] vnc: null-check the cursor state before using it
+
+vnc_output_update_cursor() dereferences two pointers unchecked that its
+sibling vnc_output_assign_cursor_plane() guards:
+
+  pointer          - vnc_output_get_pointer() returns NULL when the first
+                     peer's seat has no pointer, or when its sprite is not
+                     in the output's z-order list. A newly connected client
+                     hits the second case: peers are inserted at the head of
+                     output->peers, so it immediately becomes the peer that
+                     vnc_output_get_pointer() picks, while no sprite has
+                     been set for its seat yet.
+
+  cursor_surface   - output->cursor_surface is assigned in exactly one
+                     place, vnc_output_assign_cursor_plane(), and is never
+                     cleared. It is NULL until that first succeeds.
+
+The two are refreshed only while vnc_output_assign_planes() keeps calling
+vnc_output_assign_cursor_plane(), and it stops doing so as soon as any
+connected client does not advertise RFB_ENCODING_CURSOR, since
+vnc_clients_support_cursor() then returns false. vnc_output_repaint()
+calls vnc_output_update_cursor() unconditionally regardless.
+
+That asymmetry leaves a window in which the reader keeps running while
+nothing refreshes what it reads. Observed under gdb on 16.0.0 with two
+clients: once a second client without RFB_ENCODING_CURSOR joins, the
+assignment stops and the dereference still runs several more times on a
+pointer nothing updates any more.
+
+This has not been tied to an observed crash; it is a defensive change to
+match the guards the sibling function already applies.
+---
+ libweston/backend-vnc/vnc.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/libweston/backend-vnc/vnc.c b/libweston/backend-vnc/vnc.c
+index 6d3f6748..107a5c76 100644
+--- a/libweston/backend-vnc/vnc.c
++++ b/libweston/backend-vnc/vnc.c
+@@ -596,8 +596,31 @@ vnc_output_update_cursor(struct vnc_output *output)
+ 	if (!update_cursor)
+ 		return;
+ 
++	/*
++	 * vnc_output_get_pointer() returns NULL when the first peer's seat has
++	 * no pointer, or when the pointer's sprite is not in the output's
++	 * z-order list — which is the case for a client that has just
++	 * connected, since peers are inserted at the head of the list and no
++	 * sprite has been set for its seat yet.
++	 *
++	 * output->cursor_surface is only ever assigned, in
++	 * vnc_output_assign_cursor_plane(), and never cleared. It is NULL
++	 * until that first runs, and afterwards it is refreshed only while
++	 * vnc_output_assign_planes() keeps calling that function — which stops
++	 * as soon as any connected client does not advertise
++	 * RFB_ENCODING_CURSOR. This function is called unconditionally from
++	 * vnc_output_repaint() either way.
++	 *
++	 * vnc_output_assign_cursor_plane() already guards both of these; do
++	 * the same here rather than dereference them unchecked.
++	 */
++	if (!pointer || !output->cursor_surface)
++		return;
++
+ 	cursor_surface = output->cursor_surface;
+ 	buffer = cursor_surface->buffer_ref.buffer;
++	if (!buffer)
++		return;
+ 
+ 	frame = nvnc_frame_new(buffer->width, buffer->height, DRM_FORMAT_ARGB8888, buffer->width);
+ 	assert(frame);
+-- 
+2.39.5 (Apple Git-154)
+
