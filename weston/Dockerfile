@@ -63,9 +63,18 @@ FROM weston-src AS vnc-backend-builder
 
 COPY vnc-backend/*.patch /patches/
 
+# One at a time, in glob order. `git apply --check /patches/*.patch` cannot be
+# used here: --check never writes, so every patch is checked against the
+# unmodified tree, and two patches that touch the same region — as the seat
+# pooling and clipboard ones both do in struct vnc_backend — can never both
+# pass it, however they are ordered.
+RUN set -eux; \
+    cd /src/weston; \
+    for patch in /patches/*.patch; do \
+      echo "applying $patch"; \
+      git apply "$patch"; \
+    done
 RUN cd /src/weston \
-    && git apply --check /patches/*.patch \
-    && git apply /patches/*.patch \
     && meson setup build \
        -Dbackend-rdp=true -Dbackend-vnc=true -Drenderer-vulkan=true \
        -Dsystemd=true -Ddoc=false \

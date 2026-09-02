@@ -1,6 +1,6 @@
-From f59689bb9e96e11e00b869426a1c8c68d832ba0a Mon Sep 17 00:00:00 2001
+From 6786670fc466a9cc5da467d937ba17df49a74449 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?J=C3=B3n=20Bjarni=20Bjarnason?= <jon@centroid.is>
-Date: Tue, 1 Sep 2026 14:45:48 +0000
+Date: Wed, 2 Sep 2026 13:49:33 +0000
 Subject: [PATCH] vnc: bridge the clipboard between RFB cut text and the
  selection
 
@@ -33,11 +33,11 @@ extended clipboard send UTF-8, and neatvnc passes both through
 unconverted. Incoming text that is not valid UTF-8 is therefore treated
 as latin-1 and converted, which leaves ASCII alone either way.
 ---
- libweston/backend-vnc/vnc.c | 702 ++++++++++++++++++++++++++++++++++++
- 1 file changed, 702 insertions(+)
+ libweston/backend-vnc/vnc.c | 706 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 706 insertions(+)
 
 diff --git a/libweston/backend-vnc/vnc.c b/libweston/backend-vnc/vnc.c
-index 6d3f674..ae74187 100644
+index ec32e57..8729b04 100644
 --- a/libweston/backend-vnc/vnc.c
 +++ b/libweston/backend-vnc/vnc.c
 @@ -34,6 +34,9 @@
@@ -50,23 +50,27 @@ index 6d3f674..ae74187 100644
  #include <linux/input.h>
  #include <netinet/in.h>
  #include <pwd.h>
-@@ -78,6 +81,15 @@ struct vnc_backend {
- 
- 	const struct pixel_format_info **formats;
+@@ -81,6 +84,19 @@ struct vnc_backend {
  	unsigned int formats_count;
+ 
+ 	struct wl_list seat_pool;	/* struct vnc_seat::link */
 +
 +	/* Clipboard bridging; see the block above vnc_new_client(). */
 +	struct wl_list clipboard_seats;
 +	struct wl_list clipboard_writes;
 +	struct vnc_clipboard_read *clipboard_read;
 +	struct wl_listener seat_created_listener;
-+	/* Set only while vnc_new_client() is inside weston_seat_init(), so
-+	 * the seat_created_signal it raises can be recognised as ours. */
++	/* Set only while a *new* peer seat is being created, so the
++	 * seat_created_signal that weston_seat_init() raises can be
++	 * recognised as ours. A seat taken back off the pool raises no such
++	 * signal, and needs none: it was marked when it was first created and
++	 * the record has been kept ever since, because a pooled seat is not
++	 * released until the backend goes away. */
 +	bool creating_peer_seat;
  };
  
- struct vnc_output {
-@@ -104,6 +116,50 @@ struct vnc_peer {
+ struct vnc_seat {
+@@ -112,6 +128,50 @@ struct vnc_peer {
  	struct wl_list link;
  };
  
@@ -117,7 +121,7 @@ index 6d3f674..ae74187 100644
  struct vnc_head {
  	struct weston_head base;
  };
-@@ -788,6 +844,644 @@ vnc_update_buffer(struct nvnc_display *display, struct pixman_region32 *damage)
+@@ -855,6 +915,644 @@ vnc_update_buffer(struct nvnc_display *display, struct pixman_region32 *damage)
  	pixman_region_fini(&nvnc_damage);
  }
  
@@ -762,27 +766,27 @@ index 6d3f674..ae74187 100644
  static void
  vnc_new_client(struct nvnc_client *client)
  {
-@@ -804,7 +1498,9 @@ vnc_new_client(struct nvnc_client *client)
- 	peer->backend = backend;
- 	peer->seat = xzalloc(sizeof(*peer->seat));
+@@ -878,7 +1576,9 @@ vnc_new_client(struct nvnc_client *client)
+ 		wl_list_remove(&seat->link);
+ 	} else {
+ 		seat = xzalloc(sizeof(*seat));
++		backend->creating_peer_seat = true;
+ 		weston_seat_init(&seat->base, backend->compositor, seat_name);
++		backend->creating_peer_seat = false;
+ 	}
  
-+	backend->creating_peer_seat = true;
- 	weston_seat_init(peer->seat, backend->compositor, seat_name);
-+	backend->creating_peer_seat = false;
- 	weston_seat_init_pointer(peer->seat);
- 	weston_seat_init_keyboard(peer->seat, backend->xkb_keymap);
- 
-@@ -996,6 +1692,8 @@ vnc_destroy(struct weston_backend *base)
- 	struct weston_compositor *ec = backend->compositor;
+ 	peer->seat = &seat->base;
+@@ -1075,6 +1775,8 @@ vnc_destroy(struct weston_backend *base)
  	struct weston_head *head, *next;
+ 	struct vnc_seat *seat, *seat_next;
  
 +	vnc_clipboard_destroy(backend);
 +
  	nvnc_del(backend->server);
  
- 	wl_list_remove(&backend->base.link);
-@@ -1228,6 +1926,8 @@ vnc_backend_create(struct weston_compositor *compositor,
- 	wl_list_init(&backend->base.link);
+ 	/*
+@@ -1335,6 +2037,8 @@ vnc_backend_create(struct weston_compositor *compositor,
+ 	wl_list_init(&backend->seat_pool);
  
  	backend->compositor = compositor;
 +	wl_list_init(&backend->clipboard_seats);
@@ -790,7 +794,7 @@ index 6d3f674..ae74187 100644
  	backend->base.destroy = vnc_destroy;
  	backend->base.create_output = vnc_create_output;
  	backend->vnc_monitor_refresh_rate = config->refresh_rate * 1000;
-@@ -1325,6 +2025,8 @@ vnc_backend_create(struct weston_compositor *compositor,
+@@ -1432,6 +2136,8 @@ vnc_backend_create(struct weston_compositor *compositor,
  	nvnc_set_userdata(backend->server, backend, NULL);
  	nvnc_set_name(backend->server, "Weston VNC backend");
  
