@@ -222,13 +222,13 @@ weston: ../libweston/compositor.c:3950: weston_output_repaint:
              "empty scene graph at repaint"' failed.
 ```
 
-That is an abort (SIGABRT) in **libweston core**, not in the backend, so
-swapping `vnc-backend.so` cannot address it — it needs an upstream fix or a
-weston rebuild. It reproduced in both runs with this patch applied. It is
-almost certainly pre-existing and merely masked before, since the segfault
-arrived first and this patch only adds early returns to
-`vnc_output_update_cursor()` — it cannot add or remove paint nodes. That
-reasoning has not been separately proven.
+The abort itself is in **libweston core**, not in the backend. The guess
+recorded here was that this therefore needed an upstream fix or a weston
+rebuild; that turned out to be wrong, and `0004` fixes it from module code.
+The reasoning above was right as far as it went — the assert is pre-existing
+and this patch only masked it by crashing first — but the cause is in the
+backend even though the abort is not. The scene graph is empty because the
+backend has just had weston kill `weston-desktop-shell`. See `0004`.
 
 ## Still not tested
 
@@ -241,6 +241,147 @@ for a headless one), and that means the live compositor.
 
 Present unchanged in weston `main`; there are no commits to
 `libweston/backend-vnc/` since the `16.0.0` tag at all.
+
+# `0004` — pooling the per-client seats
+
+This is the "empty scene graph at repaint" abort that `0002` ran into and
+left open. It is not a second bug in libweston; it is the last step of a
+chain that starts in `vnc.c`.
+
+## The chain
+
+Every VNC client gets its own `wl_seat`: `vnc_new_client()` allocates a
+`weston_seat` and `vnc_client_cleanup()` releases it. `weston_seat_release()`
+ends in `wl_global_destroy()`, which unlinks the global from the display's
+list immediately.
+
+`registry_bind()` in libwayland answers a bind for a name that is no longer
+in that list with a fatal protocol error:
+
+```
+wl_display@1.error(wl_registry@2, 0, "global wl_seat (23) is unavailable")
+```
+
+No client can avoid this. It binds from the registry it was handed, and the
+seat can disappear between the `wl_registry.global` event and the bind
+arriving at the compositor. Weston kills the offending client — and the
+clients most often mid-bind are weston's own, `weston-desktop-shell` and the
+input method (`centroidx-keyboard`). **Both** die, not just the shell. Weston
+respawns them, but the output is left with no paint nodes in the meantime and
+`weston_output_repaint()` asserts.
+
+So the fatal event is not "desktop-shell cannot run at all" — weston does try
+to respawn it. It is the empty scene graph in the window before the respawn
+maps anything.
+
+## The patch
+
+Rather than trying to time the destroy, stop destroying. A disconnecting
+client's seat goes on a free list on the backend and the next client takes it
+back. The seat global is created once per pooled seat and outlives every
+individual client, so a bind cannot lose a race with anything.
+
+Parking releases the pointer and keyboard, which is the path a physical seat
+already takes when its last device is unplugged: focus cleared, grabs
+cancelled, sprite unmapped, an empty capabilities event sent — but
+`pointer_state` and `keyboard_state` deliberately kept, with a comment in
+`libweston/input.c` saying so, "so that a newly attached pointer on this seat
+will retain the previous cursor co-ordinates". Reattaching in
+`vnc_new_client()` is then all a reused seat needs. Reuse is what the API is
+built for, not a trick played on it.
+
+Two properties worth having:
+
+* **Bounded resources.** Each live seat holds a `memfd:weston-shared` for its
+  xkb keymap. The pool grows only to the high-water mark of *concurrent*
+  clients, so fd use tracks concurrency rather than the reconnect rate.
+  Measured below.
+* **A leak fixed.** The `weston_seat` that `vnc_new_client()` allocates was
+  never freed — upstream leaks one per session. Pooled seats are reused, and
+  `vnc_destroy()` drains the pool for real once `nvnc_del()` has disconnected
+  everyone.
+
+## Reproduced
+
+Container on the hq rig, `backends=vnc` only, `renderer=pixman`, 1280x720,
+`desktop-shell.so` plus the `[input-method]` keyboard, loopback port. Load is
+ten clients looping: full RA2ne (security type 6) handshake through
+`ServerInit`, brief hold, then a clean `close()`. Stock `pr-16`:
+
+| run | sessions before death | exit |
+| --- | --- | --- |
+| 1 | 10 | 134 (SIGABRT, the assert) |
+| 2 | 10 | 1 |
+
+Both documented shapes, within a minute. With `WAYLAND_DEBUG=1` the same run
+shows the cause directly, twice in the same millisecond — once per internal
+client:
+
+```
+[12:10:48.996175]  -> wl_display#1.error(wl_registry#2, 0, "global wl_seat (23) is unavailable")
+[12:10:48.997233]  -> wl_display#1.error(wl_registry#2, 0, "global wl_seat (23) is unavailable")
+```
+
+It is a race. Single clean runs mean nothing; twenty *persistent* clients are
+fine, so it is the churn that matters, not the client count.
+
+## Post-fix
+
+One compositor instance, three runs back to back, **7189 sessions total**:
+
+| load | duration | sessions | rate | result |
+| --- | --- | --- | --- | --- |
+| 10 churning | 300 s | 4494 | 14.9/s | survived |
+| 20 churning | 181 s | 2675 | 14.8/s | survived |
+| 20 persistent | 91 s | 20 | — | survived |
+
+Zero occurrences across the whole log of `"is unavailable"`, of the assert, of
+`"error in client communication"`, of `"Too many open files"`, and zero
+`respawning...` lines — the shell and the keyboard were never killed once.
+
+File descriptors on the compositor: **25 at rest, 34 after the 4494-session
+run, 45 at the end** with 20 concurrent clients. Flat in the number of
+sessions, linear in concurrency, which is the point.
+
+## A shape that was tried and rejected
+
+The first attempt was libwayland's race-free removal: `wl_global_remove()` to
+unpublish the seat while leaving it bindable, plus
+`wl_global_set_withdrawn_listener()` to destroy it once every registry has
+acknowledged. That is the textbook fix and it *did* kill the protocol error —
+zero occurrences in 1517 sessions, against death at 10 without it.
+
+It was rejected because it still crashed, for a new reason. Acknowledgements
+arrive in bursts tens of seconds later, so under sustained churn the pending
+seats pile up, each holding its keymap `memfd`. Descriptors climbed to ~515
+against a soft `RLIMIT_NOFILE` of 1024 and the compositor died of
+`creating timer failed: Too many open files`.
+
+That is survivable with a higher `nofile` — which is being raised separately —
+but a fix that silently depends on that limit is a trap for anyone who deploys
+without it. Pooling has no such dependency, so it replaced the withdrawn
+approach rather than joining it. (Keeping both would also have left the
+withdrawn path as dead code: with a pool, no global is ever removed while the
+compositor is running.)
+
+## Not tested here
+
+* The station's mirrored `drm,vnc` pair, for the same reason as `0001` and
+  `0002` — mirroring needs a literal DRM connector, which a container has not
+  got.
+* `renderer=gl`. The lab runs pixman.
+* Cursor-flap and keyboard-slide cycles were not re-run as named regressions;
+  the earlier agent's scripts for them were deleted at teardown. The churn
+  load does exercise the `0002` path hard on its own — 7189 pointer
+  create/destroy cycles through `vnc_output_get_pointer()` with no segfault —
+  but that is a side effect, not the targeted test.
+* The `nofile` limit itself. It is being handled separately and no compose
+  change is folded in here.
+
+## Still upstream
+
+`vnc_client_cleanup()` is unchanged in weston `main`, so the race is too.
+Worth sending upstream along with `0001`.
 
 ## Why the module is swapped rather than weston rebuilt
 

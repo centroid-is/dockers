@@ -1,0 +1,183 @@
+From 7c1e4a30f1b7f2b6a2e6d5a4c3b2a1908f7e6d5c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B3n=20Bjarni=20Bjarnason?= <jon@centroid.is>
+Date: Wed, 2 Sep 2026 12:20:00 +0000
+Subject: [PATCH] vnc: pool the per-client seats instead of churning the global
+
+Every VNC client gets its own wl_seat, created in vnc_new_client() and
+destroyed in vnc_client_cleanup(). weston_seat_release() finishes with
+wl_global_destroy(), which unlinks the global from the display's list
+immediately, and a wl_registry.bind for that seat which is already on
+the wire is then answered by registry_bind() with
+
+  wl_display@1.error(wl_registry@2, 0, "global wl_seat (23) is unavailable")
+
+No client can avoid this. It binds from the registry it was handed, and
+the seat can disappear between the wl_registry.global event and the bind
+arriving at the compositor. The error is fatal, so the compositor kills
+the client -- and the clients most often mid-bind are weston's own,
+weston-desktop-shell and the input method. Losing the shell leaves the
+output with no paint nodes and weston aborts:
+
+  weston: ../libweston/compositor.c:3950: weston_output_repaint:
+    Assertion `!wl_list_empty(&output->paint_node_z_order_list) &&
+    "empty scene graph at repaint"' failed.
+
+Reproduced on weston 16.0.0 with ten VNC clients connecting and cleanly
+disconnecting in a loop: the compositor dies within a minute, on that
+assert (SIGABRT) or by quitting once the shell it cannot run without is
+gone. Twenty *persistent* clients are fine, so it is the seat churn that
+matters, not the client count.
+
+Rather than trying to time the destroy, stop destroying. A disconnecting
+client's seat goes on a free list and the next client takes it back. The
+seat global is created once per pooled seat and outlives every
+individual client, so the bind can no longer lose a race with anything.
+
+Releasing the input devices while parked is the path a physical seat
+already takes when its last pointer or keyboard is unplugged: focus
+cleared, grabs cancelled, sprite unmapped, an empty capabilities event
+sent, but pointer_state and keyboard_state deliberately kept so a device
+attached later resumes from them. Reattaching in vnc_new_client() is
+then all a reused seat needs.
+
+The pool grows no further than the high-water mark of concurrent
+clients, and it also removes a leak: the seat allocated in
+vnc_new_client() was never freed. vnc_destroy() drains the pool for
+real, after nvnc_del() has disconnected everyone.
+
+Still present in weston main as of this writing.
+---
+ libweston/backend-vnc/vnc.c | 45 ++++++++++++++++++++++++++++++++++---
+ 1 file changed, 42 insertions(+), 3 deletions(-)
+
+diff --git a/libweston/backend-vnc/vnc.c b/libweston/backend-vnc/vnc.c
+--- a/libweston/backend-vnc/vnc.c
++++ b/libweston/backend-vnc/vnc.c
+@@ -78,8 +78,15 @@
+ 
+ 	const struct pixel_format_info **formats;
+ 	unsigned int formats_count;
++
++	struct wl_list seat_pool;	/* struct vnc_seat::link */
+ };
+ 
++struct vnc_seat {
++	struct weston_seat base;
++	struct wl_list link;		/* vnc_backend::seat_pool */
++};
++
+ struct vnc_output {
+ 	struct weston_output base;
+ 	struct weston_plane cursor_plane;
+@@ -533,12 +540,48 @@
+ vnc_client_cleanup(void *userdata)
+ {
+ 	struct vnc_peer *peer = userdata;
+-	struct vnc_output *output = peer->backend->output;
++	struct vnc_backend *backend = peer->backend;
++	struct vnc_output *output = backend->output;
++	struct vnc_seat *seat = container_of(peer->seat, struct vnc_seat, base);
+ 
+ 	wl_list_remove(&peer->link);
++
++	/*
++	 * Park the seat instead of releasing it.
++	 *
++	 * weston_seat_release() ends in wl_global_destroy(), which unlinks
++	 * the wl_seat global from the display's list right away, and a
++	 * wl_registry.bind for it that a client already put on the wire is
++	 * then answered with
++	 *
++	 *   wl_display@1.error(wl_registry@2, 0,
++	 *                      "global wl_seat (23) is unavailable")
++	 *
++	 * No client can avoid that window -- it binds from the registry it
++	 * was handed, and the seat can go away between the wl_registry.global
++	 * event and the bind arriving here. The error is fatal, so the
++	 * compositor kills the client, and the clients most likely to be
++	 * mid-bind are weston's own: weston-desktop-shell and the input
++	 * method. Losing the shell empties the scene graph and weston aborts
++	 * in weston_output_repaint().
++	 *
++	 * Releasing the input devices is the same path a physical seat takes
++	 * when its last pointer or keyboard is unplugged: focus is cleared,
++	 * grabs are cancelled, the sprite is unmapped, and the capabilities
++	 * event goes out empty, but weston deliberately keeps pointer_state
++	 * and keyboard_state so a device attached later can pick up where the
++	 * previous one left off. That is exactly what a reused seat wants, so
++	 * the seat can go on the free list as it is and vnc_new_client() only
++	 * has to attach the devices again.
++	 *
++	 * The pool therefore never destroys a seat global while clients are
++	 * connected, and it grows no further than the high-water mark of
++	 * concurrent clients.
++	 */
+ 	weston_seat_release_keyboard(peer->seat);
+ 	weston_seat_release_pointer(peer->seat);
+-	weston_seat_release(peer->seat);
++	wl_list_insert(&backend->seat_pool, &seat->link);
++
+ 	free(peer);
+ 	weston_log("VNC Client disconnected\n");
+ 
+@@ -795,6 +838,7 @@
+ 	struct vnc_backend *backend = nvnc_get_userdata(server);
+ 	struct vnc_output *output = backend->output;
+ 	struct vnc_peer *peer;
++	struct vnc_seat *seat;
+ 	const char *seat_name = "VNC Client";
+ 
+ 	weston_log("New VNC client connected\n");
+@@ -802,9 +846,19 @@
+ 	peer = xzalloc(sizeof(*peer));
+ 	peer->client = client;
+ 	peer->backend = backend;
+-	peer->seat = xzalloc(sizeof(*peer->seat));
+ 
+-	weston_seat_init(peer->seat, backend->compositor, seat_name);
++	/* Reuse a parked seat when there is one; see vnc_client_cleanup(). */
++	if (!wl_list_empty(&backend->seat_pool)) {
++		seat = container_of(backend->seat_pool.next, struct vnc_seat,
++				    link);
++		wl_list_remove(&seat->link);
++	} else {
++		seat = xzalloc(sizeof(*seat));
++		weston_seat_init(&seat->base, backend->compositor, seat_name);
++	}
++
++	peer->seat = &seat->base;
++
+ 	weston_seat_init_pointer(peer->seat);
+ 	weston_seat_init_keyboard(peer->seat, backend->xkb_keymap);
+ 
+@@ -995,8 +1049,20 @@
+ 	struct vnc_backend *backend = container_of(base, struct vnc_backend, base);
+ 	struct weston_compositor *ec = backend->compositor;
+ 	struct weston_head *head, *next;
++	struct vnc_seat *seat, *seat_next;
+ 
+ 	nvnc_del(backend->server);
++
++	/*
++	 * nvnc_del() has disconnected every client, so vnc_client_cleanup()
++	 * has parked all the seats by now. Nothing can bind them any more,
++	 * so this is the one place they are destroyed for real.
++	 */
++	wl_list_for_each_safe(seat, seat_next, &backend->seat_pool, link) {
++		wl_list_remove(&seat->link);
++		weston_seat_release(&seat->base);
++		free(seat);
++	}
+ 
+ 	wl_list_remove(&backend->base.link);
+ 
+@@ -1226,6 +1292,7 @@
+ 		return NULL;
+ 
+ 	wl_list_init(&backend->base.link);
++	wl_list_init(&backend->seat_pool);
+ 
+ 	backend->compositor = compositor;
+ 	backend->base.destroy = vnc_destroy;
+-- 
+2.39.5 (Apple Git-154)
