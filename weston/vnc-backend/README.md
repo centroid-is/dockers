@@ -242,7 +242,12 @@ for a headless one), and that means the live compositor.
 Present unchanged in weston `main`; there are no commits to
 `libweston/backend-vnc/` since the `16.0.0` tag at all.
 
-## `0003` — clipboard bridging
+## `0005` — clipboard bridging
+
+> Numbered `0005`, after the pooling patch, not `0003`. Glob order is the only
+> ordering mechanism the build has, and this patch and `0004` both add fields
+> to `struct vnc_backend`, so one has to be written against the other. `0004`
+> is merged and this one is not, so this one moved.
 
 Stock `backend-vnc` implements no clipboard at all, where `backend-rdp` bridges
 MS-RDPECLIP to the seat's selection in `rdpclip.c`:
@@ -333,6 +338,40 @@ selection, the DRM one, which is the seat the HMI is listening on.
 The one thing it gives up is a Wayland client that binds a data device *only*
 to a VNC peer's seat, having started after that peer connected. Such a client
 would not be offered the text. Nothing on a station does this.
+
+### Seat pooling
+
+`0004` parks a disconnecting client's seat on a free list and hands it to the
+next client instead of destroying it, which changes two things this patch
+depends on.
+
+`weston_seat_init()` now runs only the first time a given seat is created, so
+`seat_created_signal` fires once per *pooled* seat rather than once per
+client. That is exactly what is wanted: the flag that marks a seat as one of
+this backend's own is set around that one call, and a seat taken back off the
+pool needs no re-marking — it was marked when it was first created, and the
+record has been kept ever since.
+
+`weston_seat_release()` no longer runs per client either, only when the
+backend goes away, so the per-seat record and any selection on it outlive
+individual clients by design rather than by accident. `vnc_clipboard_destroy()`
+runs at the top of `vnc_destroy()`, before `nvnc_del()` and before `0004`
+drains the pool, so the seat-destroy listeners are gone before those seats are
+released and nothing fires into freed state.
+
+Checked rather than assumed — one client connects and publishes, leaves, and
+two more take the same recycled seat in turn:
+
+```
+client A, fresh seat        seats=2 offers=1 total=23
+A gone, seat parked         seats=2 offers=1 total=23
+client B, recycled seat     seats=2 offers=1 total=23   (offer on default, none on VNC Client)
+client C, same seat again   seats=2 offers=1 total=23
+```
+
+Worth noting for the unexplained 46 below: with pooling the seat count no
+longer falls when a client leaves, so a seat-count-driven duplication would be
+*persistent*, not intermittent. The rig's 46 was intermittent.
 
 ### Text encoding
 
