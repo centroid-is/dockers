@@ -1,0 +1,801 @@
+From f59689bb9e96e11e00b869426a1c8c68d832ba0a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B3n=20Bjarni=20Bjarnason?= <jon@centroid.is>
+Date: Tue, 1 Sep 2026 14:45:48 +0000
+Subject: [PATCH] vnc: bridge the clipboard between RFB cut text and the
+ selection
+
+backend-vnc implements no clipboard at all, where backend-rdp bridges
+MS-RDPECLIP to the seat's selection in rdpclip.c. Pasting from a VNC
+client therefore does nothing: neatvnc parses the ClientCutText message
+and drops it, because no nvnc_set_cut_text_fn() handler is installed,
+and a Wayland client taking the selection is never noticed.
+
+Bridge both directions, following rdpclip.c:
+
+  - a client's cut text becomes a weston_data_source published with
+    weston_seat_set_selection(), offering text/plain;charset=utf-8,
+    text/plain, UTF8_STRING, STRING and TEXT;
+  - weston_seat::selection_signal drives a read of the new selection,
+    over a pipe, and the result goes out through nvnc_send_cut_text().
+
+Sources this backend published are recognised by their accept callback
+and skipped, so a paste is not echoed back at the client that sent it.
+
+Unlike rdpclip.c this watches every seat in the compositor rather than
+only the one belonging to the peer, tracking weston_compositor::seat_list
+and seat_created_signal. A VNC peer's seat is created when that peer
+connects, which is long after other clients have bound a wl_data_device
+to whichever seat existed when they started; a selection published only
+on the peer seat would be invisible to them.
+
+RFB 3.8 specifies cut text as latin-1, but clients that negotiate the
+extended clipboard send UTF-8, and neatvnc passes both through
+unconverted. Incoming text that is not valid UTF-8 is therefore treated
+as latin-1 and converted, which leaves ASCII alone either way.
+---
+ libweston/backend-vnc/vnc.c | 702 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 702 insertions(+)
+
+diff --git a/libweston/backend-vnc/vnc.c b/libweston/backend-vnc/vnc.c
+index 6d3f674..ae74187 100644
+--- a/libweston/backend-vnc/vnc.c
++++ b/libweston/backend-vnc/vnc.c
+@@ -34,6 +34,9 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <errno.h>
++#include <fcntl.h>
++#include <pthread.h>
++#include <signal.h>
+ #include <linux/input.h>
+ #include <netinet/in.h>
+ #include <pwd.h>
+@@ -78,6 +81,15 @@ struct vnc_backend {
+ 
+ 	const struct pixel_format_info **formats;
+ 	unsigned int formats_count;
++
++	/* Clipboard bridging; see the block above vnc_new_client(). */
++	struct wl_list clipboard_seats;
++	struct wl_list clipboard_writes;
++	struct vnc_clipboard_read *clipboard_read;
++	struct wl_listener seat_created_listener;
++	/* Set only while vnc_new_client() is inside weston_seat_init(), so
++	 * the seat_created_signal it raises can be recognised as ours. */
++	bool creating_peer_seat;
+ };
+ 
+ struct vnc_output {
+@@ -104,6 +116,50 @@ struct vnc_peer {
+ 	struct wl_list link;
+ };
+ 
++/* A client's clipboard text, published as the selection on one seat. */
++struct vnc_data_source {
++	struct weston_data_source base;
++	struct vnc_backend *backend;
++	char *data;
++	size_t size;
++	/* Set once weston has handed the selection to someone else. The
++	 * source outlives that (see vnc_data_source_cancel()), and must not
++	 * serve its stale text if it is somehow asked to. */
++	bool cancelled;
++};
++
++/* One seat whose selection is bridged to and from the VNC clients. */
++struct vnc_clipboard_seat {
++	struct vnc_backend *backend;
++	struct weston_seat *seat;
++	/* A seat this backend created for one of its own peers, rather than
++	 * one that belongs to the rest of the compositor. */
++	bool is_peer_seat;
++	/* The source last published here; owned, freed when superseded. */
++	struct vnc_data_source *source;
++	struct wl_listener selection_listener;
++	struct wl_listener seat_destroy_listener;
++	struct wl_list link;
++};
++
++/* One in-flight hand-off of clipboard text to a requesting Wayland client. */
++struct vnc_clipboard_write {
++	struct wl_event_source *event_source;
++	struct wl_list link;
++	char *data;
++	size_t size;
++	size_t offset;
++	int fd;
++};
++
++/* The in-flight read of a Wayland client's selection, on its way out. */
++struct vnc_clipboard_read {
++	struct vnc_backend *backend;
++	struct wl_event_source *event_source;
++	struct wl_array data;
++	int fd;
++};
++
+ struct vnc_head {
+ 	struct weston_head base;
+ };
+@@ -788,6 +844,644 @@ vnc_update_buffer(struct nvnc_display *display, struct pixman_region32 *damage)
+ 	pixman_region_fini(&nvnc_damage);
+ }
+ 
++/*
++ * Clipboard bridging between RFB cut text and the seats' selections.
++ *
++ * Modelled on backend-rdp's rdpclip.c, which does the same job for
++ * MS-RDPECLIP. Two directions:
++ *
++ *  - a client's ClientCutText arrives through nvnc_set_cut_text_fn() and is
++ *    published as a weston_data_source on every seat, so Wayland clients can
++ *    paste it;
++ *  - a Wayland client taking the selection fires weston_seat::selection_signal,
++ *    and the data is read out of the source and broadcast with
++ *    nvnc_send_cut_text().
++ *
++ * Every seat is tracked, not just the ones this backend creates for its own
++ * peers. A VNC peer's seat comes into existence when the peer connects, which
++ * is long after a client such as the on-screen application has bound its
++ * wl_data_device to whatever seat existed at start-up; publishing only on the
++ * peer seat would be invisible to it.
++ */
++
++/* Both what is offered to Wayland clients and, in this order, what is asked
++ * for when reading a selection back out. RFB carries text only. */
++static const char * const vnc_clipboard_mime_types[] = {
++	"text/plain;charset=utf-8",
++	"text/plain",
++	"UTF8_STRING",
++	"STRING",
++	"TEXT",
++};
++
++/* neatvnc's own MAX_CUT_TEXT_SIZE; there is no point reading more out of a
++ * selection than can be sent. */
++#define VNC_CLIPBOARD_MAX_SIZE 10000000
++
++static void
++vnc_data_source_accept(struct weston_data_source *base, uint32_t serial,
++		       const char *mime_type)
++{
++	/* Nothing to do: the data is already in hand. */
++}
++
++static void
++vnc_clipboard_write_destroy(struct vnc_clipboard_write *wtask)
++{
++	wl_list_remove(&wtask->link);
++	if (wtask->event_source)
++		wl_event_source_remove(wtask->event_source);
++	if (wtask->fd != -1)
++		close(wtask->fd);
++	free(wtask->data);
++	free(wtask);
++}
++
++/*
++ * write(), minus the process-wide death sentence.
++ *
++ * The fd being written to is the read end's peer of a pipe the *requesting
++ * client* created, and that client is free to exit at any point during the
++ * transfer. Writing to a pipe with no reader raises SIGPIPE, and weston
++ * installs no handler for it anywhere in its tree, so the default disposition
++ * applies and the whole compositor dies. Block it across the write, and
++ * consume the pending signal if it fired, so the caller sees a plain EPIPE.
++ */
++static ssize_t
++vnc_write_nosigpipe(int fd, const void *data, size_t size)
++{
++	sigset_t sigpipe, previous, pending;
++	ssize_t len;
++	int write_errno;
++
++	sigemptyset(&sigpipe);
++	sigaddset(&sigpipe, SIGPIPE);
++	pthread_sigmask(SIG_BLOCK, &sigpipe, &previous);
++
++	len = write(fd, data, size);
++	write_errno = errno;
++
++	/* Only drain what this write raised. If SIGPIPE was already blocked
++	 * on the way in, a pending one may belong to somebody else. */
++	if (len < 0 && write_errno == EPIPE &&
++	    !sigismember(&previous, SIGPIPE)) {
++		sigemptyset(&pending);
++		if (sigpending(&pending) == 0 &&
++		    sigismember(&pending, SIGPIPE)) {
++			const struct timespec zero = {};
++
++			while (sigtimedwait(&sigpipe, NULL, &zero) < 0 &&
++			       errno == EINTR)
++				;
++		}
++	}
++
++	pthread_sigmask(SIG_SETMASK, &previous, NULL);
++	errno = write_errno;
++	return len;
++}
++
++/* Feed one requesting client, a pipeful at a time. */
++static int
++vnc_clipboard_write_handler(int fd, uint32_t mask, void *data)
++{
++	struct vnc_clipboard_write *wtask = data;
++
++	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR))
++		goto out;
++
++	while (wtask->offset < wtask->size) {
++		ssize_t len;
++
++		len = vnc_write_nosigpipe(fd, wtask->data + wtask->offset,
++					  wtask->size - wtask->offset);
++		if (len < 0) {
++			if (errno == EINTR)
++				continue;
++			if (errno == EAGAIN)
++				return 0;
++			/* EPIPE just means the requester lost interest. */
++			if (errno != EPIPE)
++				weston_log("VNC: clipboard write failed: %s\n",
++					   strerror(errno));
++			break;
++		}
++		wtask->offset += len;
++	}
++
++out:
++	vnc_clipboard_write_destroy(wtask);
++	return 0;
++}
++
++/* A Wayland client asked for the client's clipboard text. */
++static void
++vnc_data_source_send(struct weston_data_source *base, const char *mime_type,
++		     int32_t fd)
++{
++	struct vnc_data_source *source =
++		container_of(base, struct vnc_data_source, base);
++	struct vnc_backend *backend = source->backend;
++	struct wl_event_loop *loop =
++		wl_display_get_event_loop(backend->compositor->wl_display);
++	struct vnc_clipboard_write *wtask;
++	int flags;
++
++	if (source->cancelled) {
++		close(fd);
++		return;
++	}
++
++	wtask = zalloc(sizeof *wtask);
++	if (!wtask) {
++		close(fd);
++		return;
++	}
++
++	wtask->data = malloc(source->size);
++	if (!wtask->data) {
++		free(wtask);
++		close(fd);
++		return;
++	}
++	memcpy(wtask->data, source->data, source->size);
++	wtask->size = source->size;
++	wtask->fd = fd;
++
++	/* Only this end of the pipe is made non-blocking; the read end
++	 * belongs to the requesting client and its flags are its own. */
++	flags = fcntl(fd, F_GETFL);
++	if (flags >= 0)
++		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
++
++	wl_list_insert(&backend->clipboard_writes, &wtask->link);
++
++	wtask->event_source = wl_event_loop_add_fd(loop, fd, WL_EVENT_WRITABLE,
++						   vnc_clipboard_write_handler,
++						   wtask);
++	if (!wtask->event_source)
++		vnc_clipboard_write_destroy(wtask);
++}
++
++static void
++vnc_data_source_cancel(struct weston_data_source *base)
++{
++	struct vnc_data_source *source =
++		container_of(base, struct vnc_data_source, base);
++
++	source->cancelled = true;
++
++	/*
++	 * Called from weston_seat_set_selection() while the seat still holds a
++	 * listener on this source's destroy_signal, and that listener is
++	 * removed right after this returns. Emitting the signal or freeing
++	 * here would pull the list out from under it, so the source is kept
++	 * alive and released by whoever owns it: the seat record below.
++	 */
++}
++
++static void
++vnc_data_source_destroy(struct vnc_data_source *source)
++{
++	char **mime_type;
++
++	wl_signal_emit(&source->base.destroy_signal, &source->base);
++
++	wl_array_for_each(mime_type, &source->base.mime_types)
++		free(*mime_type);
++	wl_array_release(&source->base.mime_types);
++
++	free(source->data);
++	free(source);
++}
++
++/* Publish text as the selection on one seat. */
++static void
++vnc_clipboard_set_selection(struct vnc_clipboard_seat *cseat, const char *text,
++			    size_t size)
++{
++	struct vnc_backend *backend = cseat->backend;
++	struct vnc_data_source *source, *previous;
++	unsigned int i;
++
++	source = zalloc(sizeof *source);
++	if (!source)
++		return;
++
++	source->data = malloc(size);
++	if (!source->data) {
++		free(source);
++		return;
++	}
++	memcpy(source->data, text, size);
++	source->size = size;
++	source->backend = backend;
++
++	wl_signal_init(&source->base.destroy_signal);
++	wl_array_init(&source->base.mime_types);
++	source->base.accept = vnc_data_source_accept;
++	source->base.send = vnc_data_source_send;
++	source->base.cancel = vnc_data_source_cancel;
++
++	for (i = 0; i < ARRAY_LENGTH(vnc_clipboard_mime_types); i++) {
++		char **mime_type;
++
++		mime_type = wl_array_add(&source->base.mime_types,
++					 sizeof *mime_type);
++		if (!mime_type)
++			break;
++		*mime_type = strdup(vnc_clipboard_mime_types[i]);
++	}
++
++	/* Updated before the call so the selection_signal this raises sees
++	 * the new source and recognises it as ours. */
++	previous = cseat->source;
++	cseat->source = source;
++
++	weston_seat_set_selection(cseat->seat, &source->base,
++				  wl_display_next_serial(backend->compositor->wl_display));
++
++	/* By now the seat has dropped its listener on the old source. */
++	if (previous)
++		vnc_data_source_destroy(previous);
++}
++
++static bool
++vnc_clipboard_is_valid_utf8(const char *data, size_t size)
++{
++	const uint8_t *p = (const uint8_t *)data;
++	size_t i = 0;
++
++	while (i < size) {
++		uint32_t cp = p[i];
++		size_t trailing, j;
++
++		if (cp < 0x80) {
++			i++;
++			continue;
++		} else if ((cp & 0xe0) == 0xc0) {
++			trailing = 1;
++			cp &= 0x1f;
++		} else if ((cp & 0xf0) == 0xe0) {
++			trailing = 2;
++			cp &= 0x0f;
++		} else if ((cp & 0xf8) == 0xf0) {
++			trailing = 3;
++			cp &= 0x07;
++		} else {
++			return false;
++		}
++
++		if (i + trailing >= size)
++			return false;
++
++		for (j = 1; j <= trailing; j++) {
++			if ((p[i + j] & 0xc0) != 0x80)
++				return false;
++			cp = (cp << 6) | (p[i + j] & 0x3f);
++		}
++
++		/* Overlong encodings, surrogates and out-of-range code
++		 * points are all things latin-1 text can look like. */
++		if ((trailing == 1 && cp < 0x80) ||
++		    (trailing == 2 && cp < 0x800) ||
++		    (trailing == 3 && cp < 0x10000) ||
++		    (cp >= 0xd800 && cp <= 0xdfff) ||
++		    cp > 0x10ffff)
++			return false;
++
++		i += trailing + 1;
++	}
++
++	return true;
++}
++
++static char *
++vnc_clipboard_latin1_to_utf8(const char *data, size_t size, size_t *out_size)
++{
++	size_t i, len = 0;
++	char *out, *p;
++
++	for (i = 0; i < size; i++)
++		len += ((uint8_t)data[i] < 0x80) ? 1 : 2;
++
++	out = malloc(len);
++	if (!out)
++		return NULL;
++
++	p = out;
++	for (i = 0; i < size; i++) {
++		uint8_t c = data[i];
++
++		if (c < 0x80) {
++			*p++ = c;
++		} else {
++			*p++ = 0xc0 | (c >> 6);
++			*p++ = 0x80 | (c & 0x3f);
++		}
++	}
++
++	*out_size = len;
++	return out;
++}
++
++/*
++ * A client sent us its clipboard.
++ *
++ * RFB 3.8 specifies cut text as latin-1, but every client that negotiates the
++ * extended clipboard sends UTF-8, and neatvnc hands both to this callback
++ * unconverted. Anything that is not already valid UTF-8 is therefore treated
++ * as latin-1 and converted, which leaves ASCII — the overwhelming majority —
++ * untouched either way.
++ */
++static void
++vnc_client_cut_text(struct nvnc_client *client, const char *text, uint32_t len)
++{
++	struct vnc_peer *peer = nvnc_client_get_userdata(client);
++	struct vnc_backend *backend = peer->backend;
++	struct vnc_clipboard_seat *cseat;
++	size_t size = len;
++	char *converted = NULL;
++
++	if (!len)
++		return;
++
++	if (!vnc_clipboard_is_valid_utf8(text, len)) {
++		converted = vnc_clipboard_latin1_to_utf8(text, len, &size);
++		if (!converted)
++			return;
++	}
++
++	if (weston_log_scope_is_enabled(backend->debug))
++		weston_log_scope_printf(backend->debug,
++					"clipboard: %zu bytes from client\n",
++					size);
++
++	/*
++	 * Every seat except the ones this backend made for its own peers.
++	 *
++	 * The text is one clipboard, but a selection is per seat, so a client
++	 * holding a wl_data_device on more than one seat is offered it once
++	 * per seat — and a client that reads them all ends up with the
++	 * payload repeated, once for each. Publishing on a peer's own seat
++	 * buys nothing to weigh against that: the text just came *from* that
++	 * peer, and the seat is created when the peer connects, long after
++	 * the clients that want to paste have bound their data devices to
++	 * whatever seat existed then.
++	 */
++	wl_list_for_each(cseat, &backend->clipboard_seats, link) {
++		if (cseat->is_peer_seat)
++			continue;
++		vnc_clipboard_set_selection(cseat, converted ? converted : text,
++					    size);
++	}
++
++	free(converted);
++}
++
++static void
++vnc_clipboard_read_destroy(struct vnc_clipboard_read *rtask)
++{
++	rtask->backend->clipboard_read = NULL;
++	if (rtask->event_source)
++		wl_event_source_remove(rtask->event_source);
++	if (rtask->fd != -1)
++		close(rtask->fd);
++	wl_array_release(&rtask->data);
++	free(rtask);
++}
++
++/* Drain a Wayland client's selection and hand it to the VNC clients. */
++static int
++vnc_clipboard_read_handler(int fd, uint32_t mask, void *data)
++{
++	struct vnc_clipboard_read *rtask = data;
++	struct vnc_backend *backend = rtask->backend;
++	size_t size;
++
++	for (;;) {
++		ssize_t len;
++		char *p;
++
++		if (rtask->data.alloc - rtask->data.size < 4096) {
++			if (!wl_array_add(&rtask->data, 4096))
++				goto out;
++			rtask->data.size -= 4096;
++		}
++
++		p = (char *)rtask->data.data + rtask->data.size;
++		len = read(fd, p, rtask->data.alloc - rtask->data.size);
++		if (len < 0) {
++			if (errno == EINTR)
++				continue;
++			if (errno == EAGAIN)
++				return 0;
++			weston_log("VNC: clipboard read failed: %s\n",
++				   strerror(errno));
++			goto out;
++		}
++		if (len == 0)
++			break;
++
++		rtask->data.size += len;
++		if (rtask->data.size > VNC_CLIPBOARD_MAX_SIZE) {
++			weston_log("VNC: clipboard selection too large, dropped\n");
++			goto out;
++		}
++	}
++
++	/* Some sources terminate the text, RFB counts bytes. */
++	size = rtask->data.size;
++	while (size > 0 && ((char *)rtask->data.data)[size - 1] == '\0')
++		size--;
++
++	if (size > 0) {
++		if (weston_log_scope_is_enabled(backend->debug))
++			weston_log_scope_printf(backend->debug,
++						"clipboard: %zu bytes to clients\n",
++						size);
++		nvnc_send_cut_text(backend->server, rtask->data.data, size);
++	}
++
++out:
++	vnc_clipboard_read_destroy(rtask);
++	return 0;
++}
++
++/* A selection changed on a seat we watch. */
++static void
++vnc_clipboard_selection(struct wl_listener *listener, void *data)
++{
++	struct vnc_clipboard_seat *cseat =
++		container_of(listener, struct vnc_clipboard_seat,
++			     selection_listener);
++	struct vnc_backend *backend = cseat->backend;
++	struct weston_seat *seat = data;
++	struct weston_data_source *source = seat->selection_data_source;
++	struct wl_event_loop *loop =
++		wl_display_get_event_loop(backend->compositor->wl_display);
++	struct vnc_clipboard_read *rtask;
++	const char *requested = NULL;
++	unsigned int i;
++	int flags, pipe_fd[2];
++
++	if (!source)
++		return;
++
++	/* Our own publication of a client's clipboard; do not echo it back. */
++	if (source->accept == vnc_data_source_accept)
++		return;
++
++	for (i = 0; i < ARRAY_LENGTH(vnc_clipboard_mime_types) && !requested; i++) {
++		char **mime_type;
++
++		wl_array_for_each(mime_type, &source->mime_types) {
++			if (strcmp(*mime_type, vnc_clipboard_mime_types[i]) == 0) {
++				requested = vnc_clipboard_mime_types[i];
++				break;
++			}
++		}
++	}
++
++	/* Nothing textual on offer. */
++	if (!requested)
++		return;
++
++	/* One transfer at a time; a newer selection supersedes an older. */
++	if (backend->clipboard_read)
++		vnc_clipboard_read_destroy(backend->clipboard_read);
++
++	if (pipe2(pipe_fd, O_CLOEXEC) < 0) {
++		weston_log("VNC: clipboard pipe failed: %s\n", strerror(errno));
++		return;
++	}
++
++	flags = fcntl(pipe_fd[0], F_GETFL);
++	if (flags >= 0)
++		fcntl(pipe_fd[0], F_SETFL, flags | O_NONBLOCK);
++
++	rtask = zalloc(sizeof *rtask);
++	if (!rtask) {
++		close(pipe_fd[0]);
++		close(pipe_fd[1]);
++		return;
++	}
++
++	rtask->backend = backend;
++	rtask->fd = pipe_fd[0];
++	wl_array_init(&rtask->data);
++
++	rtask->event_source = wl_event_loop_add_fd(loop, pipe_fd[0],
++						   WL_EVENT_READABLE,
++						   vnc_clipboard_read_handler,
++						   rtask);
++	if (!rtask->event_source) {
++		close(pipe_fd[0]);
++		close(pipe_fd[1]);
++		wl_array_release(&rtask->data);
++		free(rtask);
++		return;
++	}
++
++	backend->clipboard_read = rtask;
++
++	/* The write end is the data source's to close. */
++	source->send(source, requested, pipe_fd[1]);
++}
++
++static void
++vnc_clipboard_seat_free(struct vnc_clipboard_seat *cseat)
++{
++	wl_list_remove(&cseat->selection_listener.link);
++	wl_list_remove(&cseat->seat_destroy_listener.link);
++	wl_list_remove(&cseat->link);
++
++	if (cseat->source)
++		vnc_data_source_destroy(cseat->source);
++
++	free(cseat);
++}
++
++static void
++vnc_clipboard_seat_destroyed(struct wl_listener *listener, void *data)
++{
++	struct vnc_clipboard_seat *cseat =
++		container_of(listener, struct vnc_clipboard_seat,
++			     seat_destroy_listener);
++
++	vnc_clipboard_seat_free(cseat);
++}
++
++static void
++vnc_clipboard_track_seat(struct vnc_backend *backend, struct weston_seat *seat,
++			 bool is_peer_seat)
++{
++	struct vnc_clipboard_seat *cseat;
++
++	cseat = zalloc(sizeof *cseat);
++	if (!cseat)
++		return;
++
++	cseat->backend = backend;
++	cseat->seat = seat;
++	cseat->is_peer_seat = is_peer_seat;
++
++	cseat->selection_listener.notify = vnc_clipboard_selection;
++	wl_signal_add(&seat->selection_signal, &cseat->selection_listener);
++
++	cseat->seat_destroy_listener.notify = vnc_clipboard_seat_destroyed;
++	wl_signal_add(&seat->destroy_signal, &cseat->seat_destroy_listener);
++
++	wl_list_insert(&backend->clipboard_seats, &cseat->link);
++}
++
++static void
++vnc_clipboard_seat_created(struct wl_listener *listener, void *data)
++{
++	struct vnc_backend *backend =
++		container_of(listener, struct vnc_backend,
++			     seat_created_listener);
++
++	vnc_clipboard_track_seat(backend, data, backend->creating_peer_seat);
++}
++
++static void
++vnc_clipboard_init(struct vnc_backend *backend)
++{
++	struct weston_seat *seat;
++
++	nvnc_set_cut_text_fn(backend->server, vnc_client_cut_text);
++
++	backend->seat_created_listener.notify = vnc_clipboard_seat_created;
++	wl_signal_add(&backend->compositor->seat_created_signal,
++		      &backend->seat_created_listener);
++
++	wl_list_for_each(seat, &backend->compositor->seat_list, link)
++		vnc_clipboard_track_seat(backend, seat, false);
++}
++
++static void
++vnc_clipboard_destroy(struct vnc_backend *backend)
++{
++	struct vnc_clipboard_seat *cseat, *cseat_next;
++	struct vnc_clipboard_write *wtask, *wtask_next;
++
++	if (!backend->seat_created_listener.notify)
++		return;
++
++	wl_list_remove(&backend->seat_created_listener.link);
++	backend->seat_created_listener.notify = NULL;
++
++	if (backend->clipboard_read)
++		vnc_clipboard_read_destroy(backend->clipboard_read);
++
++	wl_list_for_each_safe(wtask, wtask_next, &backend->clipboard_writes, link)
++		vnc_clipboard_write_destroy(wtask);
++
++	wl_list_for_each_safe(cseat, cseat_next, &backend->clipboard_seats, link)
++		vnc_clipboard_seat_free(cseat);
++}
++
+ static void
+ vnc_new_client(struct nvnc_client *client)
+ {
+@@ -804,7 +1498,9 @@ vnc_new_client(struct nvnc_client *client)
+ 	peer->backend = backend;
+ 	peer->seat = xzalloc(sizeof(*peer->seat));
+ 
++	backend->creating_peer_seat = true;
+ 	weston_seat_init(peer->seat, backend->compositor, seat_name);
++	backend->creating_peer_seat = false;
+ 	weston_seat_init_pointer(peer->seat);
+ 	weston_seat_init_keyboard(peer->seat, backend->xkb_keymap);
+ 
+@@ -996,6 +1692,8 @@ vnc_destroy(struct weston_backend *base)
+ 	struct weston_compositor *ec = backend->compositor;
+ 	struct weston_head *head, *next;
+ 
++	vnc_clipboard_destroy(backend);
++
+ 	nvnc_del(backend->server);
+ 
+ 	wl_list_remove(&backend->base.link);
+@@ -1228,6 +1926,8 @@ vnc_backend_create(struct weston_compositor *compositor,
+ 	wl_list_init(&backend->base.link);
+ 
+ 	backend->compositor = compositor;
++	wl_list_init(&backend->clipboard_seats);
++	wl_list_init(&backend->clipboard_writes);
+ 	backend->base.destroy = vnc_destroy;
+ 	backend->base.create_output = vnc_create_output;
+ 	backend->vnc_monitor_refresh_rate = config->refresh_rate * 1000;
+@@ -1325,6 +2025,8 @@ vnc_backend_create(struct weston_compositor *compositor,
+ 	nvnc_set_userdata(backend->server, backend, NULL);
+ 	nvnc_set_name(backend->server, "Weston VNC backend");
+ 
++	vnc_clipboard_init(backend);
++
+ 	if (!config->disable_tls) {
+ 		if (!nvnc_has_auth()) {
+ 			weston_log("Neat VNC built without TLS support\n");
