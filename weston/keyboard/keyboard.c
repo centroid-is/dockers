@@ -30,12 +30,15 @@
  * a Gboard-like look and feel:
  *  - opaque light sheet, rounded flat keys, staggered home row,
  *    accent-colored Enter, pressed-key highlight, cairo-drawn icons
+ *  - three pages like Gboard: letters, ?123 and =\<, reached by the
+ *    key in the bottom-left and (between the symbol pages) the key in
+ *    the shift slot
  *  - digit hints on the top row, long-press to type them
  *  - auto-repeat on hold for backspace and the navigation keys
  *  - one-shot shift, double-tap for caps lock
  *  - a real numeric keypad (decimal point, minus, delete) for
  *    digits/number content purposes
- *  - a navigation cluster on both layouts: Home/Up/End over
+ *  - a navigation cluster on every layout: Home/Up/End over
  *    Left/Down/Right, laid out like a physical keyboard
  *  - direct commit_string typing (no preedit)
  */
@@ -91,13 +94,22 @@ struct virtual_keyboard {
 	struct zwp_input_panel_surface_v1 *ips;
 };
 
+enum keyboard_state {
+	KEYBOARD_STATE_DEFAULT,
+	KEYBOARD_STATE_UPPERCASE,	/* one-shot shift */
+	KEYBOARD_STATE_LOCKED,		/* caps lock */
+	KEYBOARD_STATE_SYMBOLS,		/* ?123: digits and everyday punctuation */
+	KEYBOARD_STATE_SYMBOLS2		/* =\<: currency, brackets and maths */
+};
+
 enum key_type {
 	keytype_default,
 	keytype_backspace,
 	keytype_enter,
 	keytype_space,
 	keytype_switch,
-	keytype_symbols,
+	/* switches to the page named on the key itself */
+	keytype_page,
 	keytype_spacer,
 	/* taps the keysym carried on the key itself: cursor movement, Home,
 	 * End, Delete. Drawn as an icon when the label is empty, as text
@@ -109,8 +121,9 @@ struct key {
 	enum key_type key_type;
 
 	const char *label;
+	/* shifted label; NULL on keys that do not shift — the symbol pages
+	 * carry no shift key, so their keys leave it unset */
 	const char *uppercase;
-	const char *symbol;
 
 	/* width in layout grid units */
 	unsigned int width;
@@ -121,6 +134,9 @@ struct key {
 	/* the keysym this key taps; set for keytype_arrow and
 	 * keytype_backspace, which share the tap-and-repeat path */
 	xkb_keysym_t keysym;
+
+	/* keytype_page: the page this key switches to */
+	enum keyboard_state page;
 };
 
 struct layout {
@@ -153,55 +169,169 @@ struct layout {
  * hints typed by long-press; the ?123 page has the digits full-size.
  */
 static const struct key normal_keys[] = {
-	{ keytype_default, "q", "Q", "1", 2, "1"},
-	{ keytype_default, "w", "W", "2", 2, "2"},
-	{ keytype_default, "e", "E", "3", 2, "3"},
-	{ keytype_default, "r", "R", "4", 2, "4"},
-	{ keytype_default, "t", "T", "5", 2, "5"},
-	{ keytype_default, "y", "Y", "6", 2, "6"},
-	{ keytype_default, "u", "U", "7", 2, "7"},
-	{ keytype_default, "i", "I", "8", 2, "8"},
-	{ keytype_default, "o", "O", "9", 2, "9"},
-	{ keytype_default, "p", "P", "0", 2, "0"},
-	{ keytype_spacer, "", "", "", 6},
+	{ keytype_default, "q", "Q", 2, "1"},
+	{ keytype_default, "w", "W", 2, "2"},
+	{ keytype_default, "e", "E", 2, "3"},
+	{ keytype_default, "r", "R", 2, "4"},
+	{ keytype_default, "t", "T", 2, "5"},
+	{ keytype_default, "y", "Y", 2, "6"},
+	{ keytype_default, "u", "U", 2, "7"},
+	{ keytype_default, "i", "I", 2, "8"},
+	{ keytype_default, "o", "O", 2, "9"},
+	{ keytype_default, "p", "P", 2, "0"},
+	{ keytype_spacer, "", "", 6},
 
-	{ keytype_spacer, "", "", "", 1},
-	{ keytype_default, "a", "A", "-", 2},
-	{ keytype_default, "s", "S", "/", 2},
-	{ keytype_default, "d", "D", ":", 2},
-	{ keytype_default, "f", "F", ";", 2},
-	{ keytype_default, "g", "G", "(", 2},
-	{ keytype_default, "h", "H", ")", 2},
-	{ keytype_default, "j", "J", "$", 2},
-	{ keytype_default, "k", "K", "&", 2},
-	{ keytype_default, "l", "L", "@", 2},
-	{ keytype_spacer, "", "", "", 1},
-	{ keytype_spacer, "", "", "", 6},
+	{ keytype_spacer, "", "", 1},
+	{ keytype_default, "a", "A", 2},
+	{ keytype_default, "s", "S", 2},
+	{ keytype_default, "d", "D", 2},
+	{ keytype_default, "f", "F", 2},
+	{ keytype_default, "g", "G", 2},
+	{ keytype_default, "h", "H", 2},
+	{ keytype_default, "j", "J", 2},
+	{ keytype_default, "k", "K", 2},
+	{ keytype_default, "l", "L", 2},
+	{ keytype_spacer, "", "", 1},
+	{ keytype_spacer, "", "", 6},
 
-	{ keytype_switch, "", "", "", 3},
-	{ keytype_default, "z", "Z", "*", 2},
-	{ keytype_default, "x", "X", "\"", 2},
-	{ keytype_default, "c", "C", "'", 2},
-	{ keytype_default, "v", "V", "!", 2},
-	{ keytype_default, "b", "B", "?", 2},
-	{ keytype_default, "n", "N", "+", 2},
-	{ keytype_default, "m", "M", "=", 2},
-	{ keytype_backspace, "", "", "", 3, NULL, XKB_KEY_BackSpace},
-	{ keytype_arrow, "Home", "Home", "Home", 2, NULL, XKB_KEY_Home},
-	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Up},
-	{ keytype_arrow, "End", "End", "End", 2, NULL, XKB_KEY_End},
+	{ keytype_switch, "", "", 3},
+	{ keytype_default, "z", "Z", 2},
+	{ keytype_default, "x", "X", 2},
+	{ keytype_default, "c", "C", 2},
+	{ keytype_default, "v", "V", 2},
+	{ keytype_default, "b", "B", 2},
+	{ keytype_default, "n", "N", 2},
+	{ keytype_default, "m", "M", 2},
+	{ keytype_backspace, "", "", 3, NULL, XKB_KEY_BackSpace},
+	{ keytype_arrow, "Home", "Home", 2, NULL, XKB_KEY_Home},
+	{ keytype_arrow, "", "", 2, NULL, XKB_KEY_Up},
+	{ keytype_arrow, "End", "End", 2, NULL, XKB_KEY_End},
 
 	/* TODO(languages): when Icelandic/Polish land, a globe key goes
 	 * between ?123 and the comma (where Gboard keeps its gear key)
 	 * and the space bar shrinks to 8 units to make room. */
-	{ keytype_symbols, "?123", "?123", "ABC", 3},
-	{ keytype_default, ",", ",", "_", 2},
-	{ keytype_space, "", "", "", 10},
-	{ keytype_default, ".", ".", "%", 2},
-	{ keytype_enter, "", "", "", 3},
-	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Left},
-	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Down},
-	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Right}
+	{ keytype_page, "?123", NULL, 3, NULL, 0, KEYBOARD_STATE_SYMBOLS},
+	{ keytype_default, ",", ",", 2},
+	{ keytype_space, "", "", 10},
+	{ keytype_default, ".", ".", 2},
+	{ keytype_enter, "", "", 3},
+	{ keytype_arrow, "", "", 2, NULL, XKB_KEY_Left},
+	{ keytype_arrow, "", "", 2, NULL, XKB_KEY_Down},
+	{ keytype_arrow, "", "", 2, NULL, XKB_KEY_Right}
+};
+
+/*
+ * Symbol page 1 (?123): Gboard's own arrangement — the digit row on top,
+ * the punctuation most text fields want below it, and =\< in the shift
+ * slot leading to page 2. Same 26-unit grid and navigation cluster as the
+ * alpha layout, so the panel footprint is unchanged.
+ */
+static const struct key symbols_keys[] = {
+	{ keytype_default, "1", NULL, 2},
+	{ keytype_default, "2", NULL, 2},
+	{ keytype_default, "3", NULL, 2},
+	{ keytype_default, "4", NULL, 2},
+	{ keytype_default, "5", NULL, 2},
+	{ keytype_default, "6", NULL, 2},
+	{ keytype_default, "7", NULL, 2},
+	{ keytype_default, "8", NULL, 2},
+	{ keytype_default, "9", NULL, 2},
+	{ keytype_default, "0", NULL, 2},
+	{ keytype_spacer, "", NULL, 6},
+
+	{ keytype_default, "@", NULL, 2},
+	{ keytype_default, "#", NULL, 2},
+	{ keytype_default, "$", NULL, 2},
+	{ keytype_default, "_", NULL, 2},
+	{ keytype_default, "&", NULL, 2},
+	{ keytype_default, "-", NULL, 2},
+	{ keytype_default, "+", NULL, 2},
+	{ keytype_default, "(", NULL, 2},
+	{ keytype_default, ")", NULL, 2},
+	{ keytype_default, "/", NULL, 2},
+	{ keytype_spacer, "", NULL, 6},
+
+	{ keytype_page, "=\\<", NULL, 3, NULL, 0, KEYBOARD_STATE_SYMBOLS2},
+	{ keytype_default, "*", NULL, 2},
+	{ keytype_default, "\"", NULL, 2},
+	{ keytype_default, "'", NULL, 2},
+	{ keytype_default, ":", NULL, 2},
+	{ keytype_default, ";", NULL, 2},
+	{ keytype_default, "!", NULL, 2},
+	{ keytype_default, "?", NULL, 2},
+	{ keytype_backspace, "", NULL, 3, NULL, XKB_KEY_BackSpace},
+	{ keytype_arrow, "Home", NULL, 2, NULL, XKB_KEY_Home},
+	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Up},
+	{ keytype_arrow, "End", NULL, 2, NULL, XKB_KEY_End},
+
+	{ keytype_page, "ABC", NULL, 3, NULL, 0, KEYBOARD_STATE_DEFAULT},
+	{ keytype_default, ",", NULL, 2},
+	{ keytype_space, "", NULL, 10},
+	{ keytype_default, ".", NULL, 2},
+	{ keytype_enter, "", NULL, 3},
+	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Left},
+	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Down},
+	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Right}
+};
+
+/*
+ * Symbol page 2 (=\<): the rest of Gboard's set — maths, currency,
+ * brackets and the legal marks. The nine-key currency row is inset by a
+ * unit on each side, the same stagger the alpha home row uses. ?123 in
+ * the shift slot goes back to page 1; ABC goes back to letters.
+ *
+ * One deviation from Gboard: % takes the slot Gboard gives ℅. Percent is
+ * everywhere on this HMI (and was reachable before the pages split),
+ * care-of is never; the two are near-indistinguishable at key size.
+ */
+static const struct key symbols2_keys[] = {
+	{ keytype_default, "~", NULL, 2},
+	{ keytype_default, "`", NULL, 2},
+	{ keytype_default, "|", NULL, 2},
+	{ keytype_default, "•", NULL, 2},
+	{ keytype_default, "√", NULL, 2},
+	{ keytype_default, "π", NULL, 2},
+	{ keytype_default, "÷", NULL, 2},
+	{ keytype_default, "×", NULL, 2},
+	{ keytype_default, "¶", NULL, 2},
+	{ keytype_default, "∆", NULL, 2},
+	{ keytype_spacer, "", NULL, 6},
+
+	{ keytype_spacer, "", NULL, 1},
+	{ keytype_default, "£", NULL, 2},
+	{ keytype_default, "¢", NULL, 2},
+	{ keytype_default, "€", NULL, 2},
+	{ keytype_default, "¥", NULL, 2},
+	{ keytype_default, "^", NULL, 2},
+	{ keytype_default, "°", NULL, 2},
+	{ keytype_default, "=", NULL, 2},
+	{ keytype_default, "{", NULL, 2},
+	{ keytype_default, "}", NULL, 2},
+	{ keytype_spacer, "", NULL, 7},
+
+	{ keytype_page, "?123", NULL, 3, NULL, 0, KEYBOARD_STATE_SYMBOLS},
+	{ keytype_default, "\\", NULL, 2},
+	{ keytype_default, "©", NULL, 2},
+	{ keytype_default, "®", NULL, 2},
+	{ keytype_default, "™", NULL, 2},
+	{ keytype_default, "%", NULL, 2},
+	{ keytype_default, "[", NULL, 2},
+	{ keytype_default, "]", NULL, 2},
+	{ keytype_backspace, "", NULL, 3, NULL, XKB_KEY_BackSpace},
+	{ keytype_arrow, "Home", NULL, 2, NULL, XKB_KEY_Home},
+	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Up},
+	{ keytype_arrow, "End", NULL, 2, NULL, XKB_KEY_End},
+
+	{ keytype_page, "ABC", NULL, 3, NULL, 0, KEYBOARD_STATE_DEFAULT},
+	{ keytype_default, ",", NULL, 2},
+	{ keytype_default, "<", NULL, 2},
+	{ keytype_space, "", NULL, 6},
+	{ keytype_default, ">", NULL, 2},
+	{ keytype_default, ".", NULL, 2},
+	{ keytype_enter, "", NULL, 3},
+	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Left},
+	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Down},
+	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Right}
 };
 
 /*
@@ -217,36 +347,36 @@ static const struct key normal_keys[] = {
  * HMI's own filters strip it, so it could only ever look broken.
  */
 static const struct key numeric_keys[] = {
-	{ keytype_default, "1", "1", "1", 2},
-	{ keytype_default, "2", "2", "2", 2},
-	{ keytype_default, "3", "3", "3", 2},
-	{ keytype_backspace, "", "", "", 2, NULL, XKB_KEY_BackSpace},
-	{ keytype_spacer, "", "", "", 6},
+	{ keytype_default, "1", NULL, 2},
+	{ keytype_default, "2", NULL, 2},
+	{ keytype_default, "3", NULL, 2},
+	{ keytype_backspace, "", NULL, 2, NULL, XKB_KEY_BackSpace},
+	{ keytype_spacer, "", NULL, 6},
 
-	{ keytype_default, "4", "4", "4", 2},
-	{ keytype_default, "5", "5", "5", 2},
-	{ keytype_default, "6", "6", "6", 2},
-	{ keytype_default, "-", "-", "-", 2},
-	{ keytype_spacer, "", "", "", 6},
+	{ keytype_default, "4", NULL, 2},
+	{ keytype_default, "5", NULL, 2},
+	{ keytype_default, "6", NULL, 2},
+	{ keytype_default, "-", NULL, 2},
+	{ keytype_spacer, "", NULL, 6},
 
-	{ keytype_default, "7", "7", "7", 2},
-	{ keytype_default, "8", "8", "8", 2},
-	{ keytype_default, "9", "9", "9", 2},
-	{ keytype_arrow, "Del", "Del", "Del", 2, NULL, XKB_KEY_Delete},
-	{ keytype_arrow, "Home", "Home", "Home", 2, NULL, XKB_KEY_Home},
-	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Up},
-	{ keytype_arrow, "End", "End", "End", 2, NULL, XKB_KEY_End},
+	{ keytype_default, "7", NULL, 2},
+	{ keytype_default, "8", NULL, 2},
+	{ keytype_default, "9", NULL, 2},
+	{ keytype_arrow, "Del", NULL, 2, NULL, XKB_KEY_Delete},
+	{ keytype_arrow, "Home", NULL, 2, NULL, XKB_KEY_Home},
+	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Up},
+	{ keytype_arrow, "End", NULL, 2, NULL, XKB_KEY_End},
 
-	{ keytype_default, "0", "0", "0", 4},
-	{ keytype_default, ".", ".", ".", 2},
-	{ keytype_enter, "", "", "", 2},
-	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Left},
-	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Down},
-	{ keytype_arrow, "", "", "", 2, NULL, XKB_KEY_Right}
+	{ keytype_default, "0", NULL, 4},
+	{ keytype_default, ".", NULL, 2},
+	{ keytype_enter, "", NULL, 2},
+	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Left},
+	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Down},
+	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Right}
 };
 
 /*
- * Both layouts must come out the same size: window_schedule_resize() is
+ * Every layout must come out the same size: window_schedule_resize() is
  * driven by columns * unit, but weston keeps whichever input-panel
  * surface was created first, so a layout that disagrees gets clipped or
  * letterboxed rather than resizing the panel.
@@ -256,6 +386,30 @@ static const struct key numeric_keys[] = {
 static const struct layout normal_layout = {
 	normal_keys,
 	sizeof(normal_keys) / sizeof(*normal_keys),
+	26,
+	4,
+	PANEL_WIDTH / 26,
+	50,
+	0,
+	"en",
+	ZWP_TEXT_INPUT_V1_TEXT_DIRECTION_LTR
+};
+
+static const struct layout symbols_layout = {
+	symbols_keys,
+	sizeof(symbols_keys) / sizeof(*symbols_keys),
+	26,
+	4,
+	PANEL_WIDTH / 26,
+	50,
+	0,
+	"en",
+	ZWP_TEXT_INPUT_V1_TEXT_DIRECTION_LTR
+};
+
+static const struct layout symbols2_layout = {
+	symbols2_keys,
+	sizeof(symbols2_keys) / sizeof(*symbols2_keys),
 	26,
 	4,
 	PANEL_WIDTH / 26,
@@ -293,13 +447,6 @@ static const uint32_t color_text        = 0x202124;
 static const uint32_t color_icon        = 0x3c4043;
 static const uint32_t color_hint        = 0x80868b;
 
-enum keyboard_state {
-	KEYBOARD_STATE_DEFAULT,
-	KEYBOARD_STATE_UPPERCASE,	/* one-shot shift */
-	KEYBOARD_STATE_LOCKED,		/* caps lock */
-	KEYBOARD_STATE_SYMBOLS
-};
-
 struct keyboard {
 	struct virtual_keyboard *keyboard;
 	struct window *window;
@@ -324,17 +471,27 @@ static const char *
 label_from_key(struct keyboard *keyboard,
 	       const struct key *key)
 {
-	switch(keyboard->state) {
-	case KEYBOARD_STATE_DEFAULT:
-		return key->label;
-	case KEYBOARD_STATE_UPPERCASE:
-	case KEYBOARD_STATE_LOCKED:
-		return key->uppercase;
-	case KEYBOARD_STATE_SYMBOLS:
-		return key->symbol;
-	}
+	bool shifted = keyboard->state == KEYBOARD_STATE_UPPERCASE ||
+		       keyboard->state == KEYBOARD_STATE_LOCKED;
 
-	return "";
+	if (shifted && key->uppercase)
+		return key->uppercase;
+
+	return key->label;
+}
+
+/* Codepoints, not bytes: the symbol pages are full of multi-byte
+ * labels that are still a single character on the key. */
+static size_t
+utf8_length(const char *s)
+{
+	size_t n = 0;
+
+	for (; *s; s++)
+		if ((*s & 0xc0) != 0x80)
+			n++;
+
+	return n;
 }
 
 static void
@@ -548,7 +705,7 @@ draw_key(struct keyboard *keyboard,
 		/* fallthrough */
 	default:
 		label = label_from_key(keyboard, key);
-		cairo_set_font_size(cr, strlen(label) > 1 ? 14 : 19);
+		cairo_set_font_size(cr, utf8_length(label) > 1 ? 14 : 19);
 		cairo_text_extents(cr, label, &extents);
 		cairo_font_extents(cr, &font_extents);
 		cairo_move_to(cr,
@@ -558,8 +715,7 @@ draw_key(struct keyboard *keyboard,
 		cairo_show_text(cr, label);
 
 		/* digit hint in the top-right corner */
-		if (key->hint &&
-		    keyboard->state != KEYBOARD_STATE_SYMBOLS) {
+		if (key->hint) {
 			cairo_set_source_rgb(cr, COL(color_hint));
 			cairo_set_font_size(cr, 11);
 			cairo_text_extents(cr, key->hint, &extents);
@@ -580,7 +736,18 @@ get_current_layout(struct virtual_keyboard *keyboard)
 	switch (keyboard->content_purpose) {
 		case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_DIGITS:
 		case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_NUMBER:
+			/* the keypad has every digit and sign a numeric
+			 * field takes, so it has no symbol pages */
 			return &numeric_layout;
+		default:
+			break;
+	}
+
+	switch (keyboard->keyboard->state) {
+		case KEYBOARD_STATE_SYMBOLS:
+			return &symbols_layout;
+		case KEYBOARD_STATE_SYMBOLS2:
+			return &symbols2_layout;
 		default:
 			return &normal_layout;
 	}
@@ -737,8 +904,7 @@ key_press(struct keyboard *keyboard, uint32_t time, const struct key *key)
 
 	switch (key->key_type) {
 	case keytype_default:
-		if (key->hint &&
-		    keyboard->state != KEYBOARD_STATE_SYMBOLS)
+		if (key->hint)
 			toytimer_arm_once_usec(&keyboard->longpress_timer,
 					       LONGPRESS_USEC);
 		break;
@@ -757,22 +923,21 @@ key_press(struct keyboard *keyboard, uint32_t time, const struct key *key)
 			keyboard->state = KEYBOARD_STATE_LOCKED;
 		} else {
 			switch (keyboard->state) {
-			case KEYBOARD_STATE_DEFAULT:
-			case KEYBOARD_STATE_SYMBOLS:
-				keyboard->state = KEYBOARD_STATE_UPPERCASE;
-				break;
 			case KEYBOARD_STATE_UPPERCASE:
 			case KEYBOARD_STATE_LOCKED:
 				keyboard->state = KEYBOARD_STATE_DEFAULT;
+				break;
+			default:
+				/* the symbol pages carry no shift key, so
+				 * this only ever fires from the letters */
+				keyboard->state = KEYBOARD_STATE_UPPERCASE;
 				break;
 			}
 		}
 		keyboard->last_shift_time = time;
 		break;
-	case keytype_symbols:
-		keyboard->state =
-			keyboard->state == KEYBOARD_STATE_SYMBOLS ?
-			KEYBOARD_STATE_DEFAULT : KEYBOARD_STATE_SYMBOLS;
+	case keytype_page:
+		keyboard->state = key->page;
 		break;
 	case keytype_space:
 	case keytype_spacer:
@@ -1011,6 +1176,8 @@ input_method_activate(void *data,
 	/* debug hook so non-default states can be screenshotted headlessly */
 	if (start_state && !strcmp(start_state, "symbols"))
 		keyboard->keyboard->state = KEYBOARD_STATE_SYMBOLS;
+	else if (start_state && !strcmp(start_state, "symbols2"))
+		keyboard->keyboard->state = KEYBOARD_STATE_SYMBOLS2;
 	else if (start_state && !strcmp(start_state, "uppercase"))
 		keyboard->keyboard->state = KEYBOARD_STATE_UPPERCASE;
 	else
@@ -1140,8 +1307,6 @@ keyboard_create(struct virtual_keyboard *virtual_keyboard)
 	struct keyboard *keyboard;
 	const struct layout *layout;
 
-	layout = get_current_layout(virtual_keyboard);
-
 	keyboard = xzalloc(sizeof *keyboard);
 	keyboard->keyboard = virtual_keyboard;
 	keyboard->window = window_create_custom(virtual_keyboard->display);
@@ -1167,6 +1332,10 @@ keyboard_create(struct virtual_keyboard *virtual_keyboard)
 	widget_set_button_handler(keyboard->widget, button_handler);
 	widget_set_touch_down_handler(keyboard->widget, touch_down_handler);
 	widget_set_touch_up_handler(keyboard->widget, touch_up_handler);
+
+	/* after virtual_keyboard->keyboard is set: the layout depends on
+	 * the page the keyboard is on */
+	layout = get_current_layout(virtual_keyboard);
 
 	window_schedule_resize(keyboard->window,
 			       layout->columns * layout->unit,
