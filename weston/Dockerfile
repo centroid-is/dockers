@@ -27,11 +27,12 @@ RUN git clone --depth 1 --branch ${WESTON_VERSION} \
 #
 # keyboard/keyboard.c is a fork of weston's own clients/keyboard.c, so it is
 # built inside the matching weston source tree: drop our file over the stock
-# one and build just the weston-keyboard target.
+# one, with the layout tables it includes beside it, and build just the
+# weston-keyboard target.
 # =============================================================================
 FROM weston-src AS keyboard-builder
 
-COPY keyboard/keyboard.c /src/weston/clients/keyboard.c
+COPY keyboard/keyboard.c keyboard/keyboard-layouts.h /src/weston/clients/
 
 # Only the client is wanted; every backend is disabled so the build stays
 # small and does not need GPU/seat libraries it will never use.
