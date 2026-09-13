@@ -23,7 +23,21 @@ permissions:
   pull-requests: write
 
 jobs:
+  # The wrapper resolves weston.ini at container start (mirror-of, keyboard
+  # layouts). Its tests need no weston, so they gate the slow image build.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # dash, as /bin/sh is on Debian, so a bashism fails here and not on a
+      # station.
+      - name: Test weston-wrapper.sh
+        run: sh weston/test/wrapper-test.sh
+
   build-and-push:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

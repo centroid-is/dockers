@@ -667,3 +667,50 @@ Weston's VNC backend has **zero** clipboard references against the RDP
 backend's 24 (`grep -ci clipboard libweston/backend-vnc/vnc.c` vs
 `libweston/backend-rdp/rdp.c`), so paste-from-client does not work over VNC at
 all. That is a separate gap, not addressed by this patch.
+
+# `0006` — keymap variant and options on the VNC seats, and reused seats
+
+## Options never reached a VNC client
+
+The VNC backend compiles a keymap of its own for the per-client seats, from
+the compositor's rule names, but copies only three of the five:
+
+```c
+backend->xkb_rule_name.rules = strdup(compositor->xkb_names.rules);
+backend->xkb_rule_name.model = strdup(compositor->xkb_names.model);
+backend->xkb_rule_name.layout = strdup(compositor->xkb_names.layout);
+```
+
+So weston.ini's `keymap_variant` and `keymap_options` apply to the panel's own
+libinput seat and are dropped for every VNC client. The layout-switch shortcut
+is an xkb *option* (`grp:alt_shift_toggle`), so with
+`keymap_layout=is,us,pl` a keyboard on the panel cycles layouts on Alt+Shift
+and a VNC keyboard is stuck in the first one forever. Nothing is logged; the
+key simply does nothing.
+
+The patch copies `variant` and `options` too. Both are NULL unless weston.ini
+sets them (`weston_compositor_set_xkb_rule_names` only defaults rules, model
+and layout), and `strdup(NULL)` is undefined, so each copy is guarded.
+`vnc_destroy()` now frees all five names; it never freed the original three.
+
+## A reused seat told its client the wrong group
+
+`0004` parks a disconnecting client's seat and hands it to the next client.
+Parking goes through `weston_seat_release_keyboard()`, whose
+`weston_keyboard_reset_state()` replaces the `xkb_state` with a fresh one —
+group 0, nothing held, no locks. It does not touch `keyboard->modifiers`, the
+serialized copy `weston_keyboard_set_focus()` sends to a newly focused client
+(`send_modifiers_to_resource`, libweston/input.c). The next client was
+therefore told the previous one's group and Caps Lock while the seat typed
+group 0 in lower case, until its first modifier key resynchronised the two.
+
+On reuse the patch calls `notify_modifiers()` once, which re-serializes the
+real state into that copy before any focus is set. A freshly created seat has
+no stale copy and is left alone.
+
+## Not tested here
+
+Built and exercised only through the image: the patch applies on 0001–0005
+in the Dockerfile's order, and the keymap `is,us,pl` with
+`grp:alt_shift_toggle` compiles in a headless start. Switching over a live
+noVNC session on a panel still wants an eyes-on check.
