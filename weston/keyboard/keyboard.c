@@ -33,7 +33,11 @@
  *  - three pages like Gboard: letters, ?123 and =\<, reached by the
  *    key in the bottom-left and (between the symbol pages) the key in
  *    the shift slot
- *  - digit hints on the top row, long-press to type them
+ *  - English, Icelandic and Polish letters pages, enabled and ordered by
+ *    KEYBOARD_LAYOUTS (first is the default); with more than one, a globe
+ *    key cycles them and the space bar names the one showing
+ *  - long-press popups: the digit hint on the top row, then the accented
+ *    letters, picked by sliding along the strip and typed on release
  *  - auto-repeat on hold for backspace and the navigation keys
  *  - one-shot shift, double-tap for caps lock
  *  - a real numeric keypad (decimal point, minus, delete) for
@@ -41,6 +45,8 @@
  *  - a navigation cluster on every layout: Home/Up/End over
  *    Left/Down/Right, laid out like a physical keyboard
  *  - direct commit_string typing (no preedit)
+ *
+ * The layout tables live in keyboard-layouts.h.
  */
 
 #include "config.h"
@@ -62,7 +68,9 @@
 #include "shared/helpers.h"
 #include "shared/xalloc.h"
 
-/* long-press delay for digit hints, auto-repeat delay/rate */
+#include "keyboard-layouts.h"
+
+/* long-press delay for popups, auto-repeat delay/rate */
 #define LONGPRESS_USEC (500 * 1000)
 #define REPEAT_DELAY_MSEC 500
 #define REPEAT_RATE_MSEC 60
@@ -92,343 +100,13 @@ struct virtual_keyboard {
 	bool toplevel;
 	bool overlay;
 	struct zwp_input_panel_surface_v1 *ips;
-};
 
-enum keyboard_state {
-	KEYBOARD_STATE_DEFAULT,
-	KEYBOARD_STATE_UPPERCASE,	/* one-shot shift */
-	KEYBOARD_STATE_LOCKED,		/* caps lock */
-	KEYBOARD_STATE_SYMBOLS,		/* ?123: digits and everyday punctuation */
-	KEYBOARD_STATE_SYMBOLS2		/* =\<: currency, brackets and maths */
-};
-
-enum key_type {
-	keytype_default,
-	keytype_backspace,
-	keytype_enter,
-	keytype_space,
-	keytype_switch,
-	/* switches to the page named on the key itself */
-	keytype_page,
-	keytype_spacer,
-	/* taps the keysym carried on the key itself: cursor movement, Home,
-	 * End, Delete. Drawn as an icon when the label is empty, as text
-	 * otherwise. */
-	keytype_arrow
-};
-
-struct key {
-	enum key_type key_type;
-
-	const char *label;
-	/* shifted label; NULL on keys that do not shift — the symbol pages
-	 * carry no shift key, so their keys leave it unset */
-	const char *uppercase;
-
-	/* width in layout grid units */
-	unsigned int width;
-
-	/* small corner hint, typed via long-press (NULL for none) */
-	const char *hint;
-
-	/* the keysym this key taps; set for keytype_arrow and
-	 * keytype_backspace, which share the tap-and-repeat path */
-	xkb_keysym_t keysym;
-
-	/* keytype_page: the page this key switches to */
-	enum keyboard_state page;
-};
-
-struct layout {
-	const struct key *keys;
-	uint32_t count;
-
-	uint32_t columns;
-	uint32_t rows;
-
-	/* pixel width of one grid unit */
-	double unit;
-	/* pixel height of one row; rows * row_h must be equal for all
-	 * layouts (weston keeps the initial input-panel surface size) */
-	double row_h;
-
-	/* horizontal inset of the visible sheet; the strip outside it is
-	 * drawn fully transparent (used to make the numpad look narrow
-	 * while the panel surface keeps the shared footprint) */
-	double sheet_inset;
-
-	const char *language;
-	uint32_t text_direction;
-};
-
-/*
- * Alpha layout: 26 grid units of PANEL_WIDTH/26 px, 4 rows of 50 px.
- * The typing block is the stock 20 units; the 6 units on the right are
- * the navigation cluster. Letter keys are 2 units; the home row is
- * staggered with 1-unit spacers like Gboard. The top row carries digit
- * hints typed by long-press; the ?123 page has the digits full-size.
- */
-static const struct key normal_keys[] = {
-	{ keytype_default, "q", "Q", 2, "1"},
-	{ keytype_default, "w", "W", 2, "2"},
-	{ keytype_default, "e", "E", 2, "3"},
-	{ keytype_default, "r", "R", 2, "4"},
-	{ keytype_default, "t", "T", 2, "5"},
-	{ keytype_default, "y", "Y", 2, "6"},
-	{ keytype_default, "u", "U", 2, "7"},
-	{ keytype_default, "i", "I", 2, "8"},
-	{ keytype_default, "o", "O", 2, "9"},
-	{ keytype_default, "p", "P", 2, "0"},
-	{ keytype_spacer, "", "", 6},
-
-	{ keytype_spacer, "", "", 1},
-	{ keytype_default, "a", "A", 2},
-	{ keytype_default, "s", "S", 2},
-	{ keytype_default, "d", "D", 2},
-	{ keytype_default, "f", "F", 2},
-	{ keytype_default, "g", "G", 2},
-	{ keytype_default, "h", "H", 2},
-	{ keytype_default, "j", "J", 2},
-	{ keytype_default, "k", "K", 2},
-	{ keytype_default, "l", "L", 2},
-	{ keytype_spacer, "", "", 1},
-	{ keytype_spacer, "", "", 6},
-
-	{ keytype_switch, "", "", 3},
-	{ keytype_default, "z", "Z", 2},
-	{ keytype_default, "x", "X", 2},
-	{ keytype_default, "c", "C", 2},
-	{ keytype_default, "v", "V", 2},
-	{ keytype_default, "b", "B", 2},
-	{ keytype_default, "n", "N", 2},
-	{ keytype_default, "m", "M", 2},
-	{ keytype_backspace, "", "", 3, NULL, XKB_KEY_BackSpace},
-	{ keytype_arrow, "Home", "Home", 2, NULL, XKB_KEY_Home},
-	{ keytype_arrow, "", "", 2, NULL, XKB_KEY_Up},
-	{ keytype_arrow, "End", "End", 2, NULL, XKB_KEY_End},
-
-	/* TODO(languages): when Icelandic/Polish land, a globe key goes
-	 * between ?123 and the comma (where Gboard keeps its gear key)
-	 * and the space bar shrinks to 8 units to make room. */
-	{ keytype_page, "?123", NULL, 3, NULL, 0, KEYBOARD_STATE_SYMBOLS},
-	{ keytype_default, ",", ",", 2},
-	{ keytype_space, "", "", 10},
-	{ keytype_default, ".", ".", 2},
-	{ keytype_enter, "", "", 3},
-	{ keytype_arrow, "", "", 2, NULL, XKB_KEY_Left},
-	{ keytype_arrow, "", "", 2, NULL, XKB_KEY_Down},
-	{ keytype_arrow, "", "", 2, NULL, XKB_KEY_Right}
-};
-
-/*
- * Symbol page 1 (?123): Gboard's own arrangement — the digit row on top,
- * the punctuation most text fields want below it, and =\< in the shift
- * slot leading to page 2. Same 26-unit grid and navigation cluster as the
- * alpha layout, so the panel footprint is unchanged.
- */
-static const struct key symbols_keys[] = {
-	{ keytype_default, "1", NULL, 2},
-	{ keytype_default, "2", NULL, 2},
-	{ keytype_default, "3", NULL, 2},
-	{ keytype_default, "4", NULL, 2},
-	{ keytype_default, "5", NULL, 2},
-	{ keytype_default, "6", NULL, 2},
-	{ keytype_default, "7", NULL, 2},
-	{ keytype_default, "8", NULL, 2},
-	{ keytype_default, "9", NULL, 2},
-	{ keytype_default, "0", NULL, 2},
-	{ keytype_spacer, "", NULL, 6},
-
-	{ keytype_default, "@", NULL, 2},
-	{ keytype_default, "#", NULL, 2},
-	{ keytype_default, "$", NULL, 2},
-	{ keytype_default, "_", NULL, 2},
-	{ keytype_default, "&", NULL, 2},
-	{ keytype_default, "-", NULL, 2},
-	{ keytype_default, "+", NULL, 2},
-	{ keytype_default, "(", NULL, 2},
-	{ keytype_default, ")", NULL, 2},
-	{ keytype_default, "/", NULL, 2},
-	{ keytype_spacer, "", NULL, 6},
-
-	{ keytype_page, "=\\<", NULL, 3, NULL, 0, KEYBOARD_STATE_SYMBOLS2},
-	{ keytype_default, "*", NULL, 2},
-	{ keytype_default, "\"", NULL, 2},
-	{ keytype_default, "'", NULL, 2},
-	{ keytype_default, ":", NULL, 2},
-	{ keytype_default, ";", NULL, 2},
-	{ keytype_default, "!", NULL, 2},
-	{ keytype_default, "?", NULL, 2},
-	{ keytype_backspace, "", NULL, 3, NULL, XKB_KEY_BackSpace},
-	{ keytype_arrow, "Home", NULL, 2, NULL, XKB_KEY_Home},
-	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Up},
-	{ keytype_arrow, "End", NULL, 2, NULL, XKB_KEY_End},
-
-	{ keytype_page, "ABC", NULL, 3, NULL, 0, KEYBOARD_STATE_DEFAULT},
-	{ keytype_default, ",", NULL, 2},
-	{ keytype_space, "", NULL, 10},
-	{ keytype_default, ".", NULL, 2},
-	{ keytype_enter, "", NULL, 3},
-	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Left},
-	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Down},
-	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Right}
-};
-
-/*
- * Symbol page 2 (=\<): the rest of Gboard's set — maths, currency,
- * brackets and the legal marks. The nine-key currency row is inset by a
- * unit on each side, the same stagger the alpha home row uses. ?123 in
- * the shift slot goes back to page 1; ABC goes back to letters.
- *
- * One deviation from Gboard: % takes the slot Gboard gives ℅. Percent is
- * everywhere on this HMI (and was reachable before the pages split),
- * care-of is never; the two are near-indistinguishable at key size.
- */
-static const struct key symbols2_keys[] = {
-	{ keytype_default, "~", NULL, 2},
-	{ keytype_default, "`", NULL, 2},
-	{ keytype_default, "|", NULL, 2},
-	{ keytype_default, "•", NULL, 2},
-	{ keytype_default, "√", NULL, 2},
-	{ keytype_default, "π", NULL, 2},
-	{ keytype_default, "÷", NULL, 2},
-	{ keytype_default, "×", NULL, 2},
-	{ keytype_default, "¶", NULL, 2},
-	{ keytype_default, "∆", NULL, 2},
-	{ keytype_spacer, "", NULL, 6},
-
-	{ keytype_spacer, "", NULL, 1},
-	{ keytype_default, "£", NULL, 2},
-	{ keytype_default, "¢", NULL, 2},
-	{ keytype_default, "€", NULL, 2},
-	{ keytype_default, "¥", NULL, 2},
-	{ keytype_default, "^", NULL, 2},
-	{ keytype_default, "°", NULL, 2},
-	{ keytype_default, "=", NULL, 2},
-	{ keytype_default, "{", NULL, 2},
-	{ keytype_default, "}", NULL, 2},
-	{ keytype_spacer, "", NULL, 7},
-
-	{ keytype_page, "?123", NULL, 3, NULL, 0, KEYBOARD_STATE_SYMBOLS},
-	{ keytype_default, "\\", NULL, 2},
-	{ keytype_default, "©", NULL, 2},
-	{ keytype_default, "®", NULL, 2},
-	{ keytype_default, "™", NULL, 2},
-	{ keytype_default, "%", NULL, 2},
-	{ keytype_default, "[", NULL, 2},
-	{ keytype_default, "]", NULL, 2},
-	{ keytype_backspace, "", NULL, 3, NULL, XKB_KEY_BackSpace},
-	{ keytype_arrow, "Home", NULL, 2, NULL, XKB_KEY_Home},
-	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Up},
-	{ keytype_arrow, "End", NULL, 2, NULL, XKB_KEY_End},
-
-	{ keytype_page, "ABC", NULL, 3, NULL, 0, KEYBOARD_STATE_DEFAULT},
-	{ keytype_default, ",", NULL, 2},
-	{ keytype_default, "<", NULL, 2},
-	{ keytype_space, "", NULL, 6},
-	{ keytype_default, ">", NULL, 2},
-	{ keytype_default, ".", NULL, 2},
-	{ keytype_enter, "", NULL, 3},
-	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Left},
-	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Down},
-	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Right}
-};
-
-/*
- * Numeric keypad: 14 grid units of PANEL_WIDTH/14 px, 4 rows — the same
- * panel footprint as the alpha layout. The keypad is the leftmost 8
- * units, flush with the edge, and the navigation cluster takes the 6 on
- * the right. Phone-style digit order; backspace / minus / delete down the
- * keypad's right; double-width 0, decimal point, Enter along the bottom.
- *
- * No plus key: a leading + is not part of any numeric-field convention
- * (HTML's valid floating-point number does not permit one, and neither
- * iOS's decimal pad nor Android's numberDecimal offers the key), and the
- * HMI's own filters strip it, so it could only ever look broken.
- */
-static const struct key numeric_keys[] = {
-	{ keytype_default, "1", NULL, 2},
-	{ keytype_default, "2", NULL, 2},
-	{ keytype_default, "3", NULL, 2},
-	{ keytype_backspace, "", NULL, 2, NULL, XKB_KEY_BackSpace},
-	{ keytype_spacer, "", NULL, 6},
-
-	{ keytype_default, "4", NULL, 2},
-	{ keytype_default, "5", NULL, 2},
-	{ keytype_default, "6", NULL, 2},
-	{ keytype_default, "-", NULL, 2},
-	{ keytype_spacer, "", NULL, 6},
-
-	{ keytype_default, "7", NULL, 2},
-	{ keytype_default, "8", NULL, 2},
-	{ keytype_default, "9", NULL, 2},
-	{ keytype_arrow, "Del", NULL, 2, NULL, XKB_KEY_Delete},
-	{ keytype_arrow, "Home", NULL, 2, NULL, XKB_KEY_Home},
-	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Up},
-	{ keytype_arrow, "End", NULL, 2, NULL, XKB_KEY_End},
-
-	{ keytype_default, "0", NULL, 4},
-	{ keytype_default, ".", NULL, 2},
-	{ keytype_enter, "", NULL, 2},
-	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Left},
-	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Down},
-	{ keytype_arrow, "", NULL, 2, NULL, XKB_KEY_Right}
-};
-
-/*
- * Every layout must come out the same size: window_schedule_resize() is
- * driven by columns * unit, but weston keeps whichever input-panel
- * surface was created first, so a layout that disagrees gets clipped or
- * letterboxed rather than resizing the panel.
- */
-#define PANEL_WIDTH 900.0
-
-static const struct layout normal_layout = {
-	normal_keys,
-	sizeof(normal_keys) / sizeof(*normal_keys),
-	26,
-	4,
-	PANEL_WIDTH / 26,
-	50,
-	0,
-	"en",
-	ZWP_TEXT_INPUT_V1_TEXT_DIRECTION_LTR
-};
-
-static const struct layout symbols_layout = {
-	symbols_keys,
-	sizeof(symbols_keys) / sizeof(*symbols_keys),
-	26,
-	4,
-	PANEL_WIDTH / 26,
-	50,
-	0,
-	"en",
-	ZWP_TEXT_INPUT_V1_TEXT_DIRECTION_LTR
-};
-
-static const struct layout symbols2_layout = {
-	symbols2_keys,
-	sizeof(symbols2_keys) / sizeof(*symbols2_keys),
-	26,
-	4,
-	PANEL_WIDTH / 26,
-	50,
-	0,
-	"en",
-	ZWP_TEXT_INPUT_V1_TEXT_DIRECTION_LTR
-};
-
-static const struct layout numeric_layout = {
-	numeric_keys,
-	sizeof(numeric_keys) / sizeof(*numeric_keys),
-	14,
-	4,
-	PANEL_WIDTH / 14,
-	50,
-	0,
-	"en",
-	ZWP_TEXT_INPUT_V1_TEXT_DIRECTION_LTR
+	/* the languages KEYBOARD_LAYOUTS enables, default first, and the one
+	 * the letters page shows. Kept across activations, the way Gboard
+	 * remembers the last language used. */
+	const struct language *languages[LANGUAGE_MAX];
+	int language_count;
+	int language_index;
 };
 
 /* Gboard-like palette */
@@ -456,9 +134,19 @@ struct keyboard {
 
 	/* the key currently held down (commit happens on release) */
 	const struct key *held_key;
-	bool long_fired;
 	uint32_t held_time;
 	uint32_t last_shift_time;
+
+	/* the long-press strip over the held key, open from the long-press
+	 * timeout until release. Geometry in widget-local pixels. */
+	struct {
+		bool open;
+		const char *entries[POPUP_MAX];
+		unsigned int count;
+		unsigned int selected;
+		double x, y;
+		double cell_w;
+	} popup;
 
 	struct toytimer longpress_timer;
 	struct toytimer repeat_timer;
@@ -467,14 +155,24 @@ struct keyboard {
 static const struct layout *
 get_current_layout(struct virtual_keyboard *keyboard);
 
+static const struct language *
+current_language(struct virtual_keyboard *keyboard)
+{
+	return keyboard->languages[keyboard->language_index];
+}
+
+static bool
+keyboard_shifted(struct keyboard *keyboard)
+{
+	return keyboard->state == KEYBOARD_STATE_UPPERCASE ||
+	       keyboard->state == KEYBOARD_STATE_LOCKED;
+}
+
 static const char *
 label_from_key(struct keyboard *keyboard,
 	       const struct key *key)
 {
-	bool shifted = keyboard->state == KEYBOARD_STATE_UPPERCASE ||
-		       keyboard->state == KEYBOARD_STATE_LOCKED;
-
-	if (shifted && key->uppercase)
+	if (keyboard_shifted(keyboard) && key->uppercase)
 		return key->uppercase;
 
 	return key->label;
@@ -503,6 +201,21 @@ rounded_rect(cairo_t *cr, double x, double y, double w, double h, double r)
 	cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
 	cairo_arc(cr, x + r, y + r, r, M_PI, 3 * M_PI / 2);
 	cairo_close_path(cr);
+}
+
+/* Draws text centred on (cx, cy), the way every key label is placed. */
+static void
+show_centered(cairo_t *cr, const char *text, double cx, double cy)
+{
+	cairo_text_extents_t extents;
+	cairo_font_extents_t font_extents;
+
+	cairo_text_extents(cr, text, &extents);
+	cairo_font_extents(cr, &font_extents);
+	cairo_move_to(cr,
+		      cx - extents.width / 2 - extents.x_bearing,
+		      cy + font_extents.height / 2 - font_extents.descent);
+	cairo_show_text(cr, text);
 }
 
 static void
@@ -573,6 +286,38 @@ draw_icon_enter(cairo_t *cr, double cx, double cy)
 }
 
 static void
+draw_icon_globe(cairo_t *cr, double cx, double cy)
+{
+	/* Gboard's language key: a circle with a meridian and three
+	 * parallels, stroked at the backspace icon's weight */
+	cairo_set_line_width(cr, 1.6);
+
+	cairo_new_path(cr);
+	cairo_arc(cr, cx, cy, 8, 0, 2 * M_PI);
+	cairo_stroke(cr);
+
+	/* the meridian is the same circle squeezed horizontally; the scale
+	 * is undone before stroking so the line keeps its width */
+	cairo_save(cr);
+	cairo_translate(cr, cx, cy);
+	cairo_scale(cr, 0.45, 1);
+	cairo_new_path(cr);
+	cairo_arc(cr, 0, 0, 8, 0, 2 * M_PI);
+	cairo_restore(cr);
+	cairo_stroke(cr);
+
+	cairo_new_path(cr);
+	cairo_move_to(cr, cx - 8, cy);
+	cairo_line_to(cr, cx + 8, cy);
+	/* chords at y = +-4 of a radius-8 circle are 6.9 either side */
+	cairo_move_to(cr, cx - 6.9, cy - 4);
+	cairo_line_to(cr, cx + 6.9, cy - 4);
+	cairo_move_to(cr, cx - 6.9, cy + 4);
+	cairo_line_to(cr, cx + 6.9, cy + 4);
+	cairo_stroke(cr);
+}
+
+static void
 draw_icon_arrow(cairo_t *cr, double cx, double cy, xkb_keysym_t sym)
 {
 	/* stemmed arrow with a chevron head, stroked to sit alongside the
@@ -618,16 +363,16 @@ draw_key(struct keyboard *keyboard,
 	 unsigned int row,
 	 unsigned int col)
 {
-	const struct layout *layout =
-		get_current_layout(keyboard->keyboard);
+	struct virtual_keyboard *vk = keyboard->keyboard;
+	const struct layout *layout = get_current_layout(vk);
 	const char *label;
 	cairo_text_extents_t extents;
-	cairo_font_extents_t font_extents;
 	double x, y, w, h, cx, cy;
 	bool pressed, accent;
 	const double gap_x = 3.5, gap_y = 4.5, radius = 6;
 
-	if (key->key_type == keytype_spacer)
+	/* a zero-width key is the globe with one language enabled */
+	if (key->key_type == keytype_spacer || key->width == 0)
 		return;
 
 	x = col * layout->unit + gap_x;
@@ -680,9 +425,7 @@ draw_key(struct keyboard *keyboard,
 
 	switch (key->key_type) {
 	case keytype_switch:
-		draw_icon_shift(cr, cx, cy,
-				keyboard->state == KEYBOARD_STATE_UPPERCASE ||
-				keyboard->state == KEYBOARD_STATE_LOCKED,
+		draw_icon_shift(cr, cx, cy, keyboard_shifted(keyboard),
 				keyboard->state == KEYBOARD_STATE_LOCKED);
 		break;
 	case keytype_backspace:
@@ -691,7 +434,19 @@ draw_key(struct keyboard *keyboard,
 	case keytype_enter:
 		draw_icon_enter(cr, cx, cy);
 		break;
+	case keytype_lang:
+		draw_icon_globe(cr, cx, cy);
+		break;
 	case keytype_space:
+		/* Gboard names the language on the space bar, and only when
+		 * there is more than one to tell apart */
+		if (vk->language_count > 1 &&
+		    layout == current_language(vk)->alpha) {
+			cairo_set_source_rgb(cr, COL(color_hint));
+			cairo_set_font_size(cr, 13);
+			show_centered(cr, current_language(vk)->name, cx, cy);
+		}
+		break;
 	case keytype_spacer:
 		break;
 	case keytype_arrow:
@@ -706,13 +461,7 @@ draw_key(struct keyboard *keyboard,
 	default:
 		label = label_from_key(keyboard, key);
 		cairo_set_font_size(cr, utf8_length(label) > 1 ? 14 : 19);
-		cairo_text_extents(cr, label, &extents);
-		cairo_font_extents(cr, &font_extents);
-		cairo_move_to(cr,
-			      cx - extents.width / 2 - extents.x_bearing,
-			      cy + font_extents.height / 2 -
-				      font_extents.descent);
-		cairo_show_text(cr, label);
+		show_centered(cr, label, cx, cy);
 
 		/* digit hint in the top-right corner */
 		if (key->hint) {
@@ -724,7 +473,70 @@ draw_key(struct keyboard *keyboard,
 				      y + 15);
 			cairo_show_text(cr, key->hint);
 		}
+
+		/* a language letter reached by long-press, in the bottom-right
+		 * corner, following shift like the label does */
+		if (key->marked && key->more && key->more[0]) {
+			const char *mark = key->more[0];
+
+			if (keyboard_shifted(keyboard) && key->more_upper)
+				mark = key->more_upper[0];
+
+			cairo_set_source_rgb(cr, COL(color_hint));
+			cairo_set_font_size(cr, 11);
+			cairo_text_extents(cr, mark, &extents);
+			cairo_move_to(cr,
+				      x + w - extents.width - 7,
+				      y + h - 6);
+			cairo_show_text(cr, mark);
+		}
 		break;
+	}
+
+	cairo_restore(cr);
+}
+
+/* The long-press strip: a raised white bar of key-sized cells, the
+ * selected one filled with the accent color like Gboard's. */
+static void
+draw_popup(struct keyboard *keyboard, cairo_t *cr,
+	   const struct layout *layout)
+{
+	const double pad = 3.5, radius = 8;
+	double x = keyboard->popup.x;
+	double y = keyboard->popup.y;
+	double cw = keyboard->popup.cell_w;
+	double w = keyboard->popup.count * cw;
+	double h = layout->row_h;
+	unsigned int i;
+
+	cairo_save(cr);
+
+	rounded_rect(cr, x, y + 2, w, h, radius);
+	cairo_set_source_rgba(cr, 0, 0, 0, 0.22);
+	cairo_fill(cr);
+
+	rounded_rect(cr, x, y, w, h, radius);
+	cairo_set_source_rgb(cr, COL(color_key));
+	cairo_fill(cr);
+
+	cairo_set_font_size(cr, 19);
+
+	for (i = 0; i < keyboard->popup.count; i++) {
+		double cell_x = x + i * cw;
+
+		if (i == keyboard->popup.selected) {
+			rounded_rect(cr, cell_x + pad, y + pad,
+				     cw - 2 * pad, h - 2 * pad, 6);
+			cairo_set_source_rgb(cr, COL(color_accent));
+			cairo_fill(cr);
+			cairo_set_source_rgb(cr, 1, 1, 1);
+		} else {
+			cairo_set_source_rgb(cr, COL(color_text));
+		}
+
+		show_centered(cr, keyboard->popup.entries[i],
+			      cell_x + cw / 2, y + h / 2);
 	}
 
 	cairo_restore(cr);
@@ -749,7 +561,7 @@ get_current_layout(struct virtual_keyboard *keyboard)
 		case KEYBOARD_STATE_SYMBOLS2:
 			return &symbols2_layout;
 		default:
-			return &normal_layout;
+			return current_language(keyboard)->alpha;
 	}
 }
 
@@ -813,6 +625,10 @@ redraw_handler(struct widget *widget, void *data)
 		}
 	}
 
+	/* last, so it sits over the keys it covers */
+	if (keyboard->popup.open)
+		draw_popup(keyboard, cr, layout);
+
 	cairo_destroy(cr);
 	cairo_surface_destroy(surface);
 }
@@ -854,17 +670,133 @@ tap_keysym(struct virtual_keyboard *keyboard, uint32_t time, xkb_keysym_t sym)
 	send_keysym(keyboard, time, sym, WL_KEYBOARD_KEY_STATE_RELEASED);
 }
 
+/* Resizes the panel to the current page and tells the text-input client
+ * which language it is typing in. */
+static void
+announce_layout(struct virtual_keyboard *keyboard)
+{
+	const struct layout *layout = get_current_layout(keyboard);
+
+	window_schedule_resize(keyboard->keyboard->window,
+			       layout->columns * layout->unit,
+			       layout->rows * layout->row_h);
+
+	if (keyboard->context) {
+		zwp_input_method_context_v1_language(keyboard->context,
+						     keyboard->serial,
+						     current_language(keyboard)->code);
+		zwp_input_method_context_v1_text_direction(keyboard->context,
+							   keyboard->serial,
+							   ZWP_TEXT_INPUT_V1_TEXT_DIRECTION_LTR);
+	}
+
+	widget_schedule_redraw(keyboard->keyboard->widget);
+}
+
+/* Where a key sits in its layout's grid; false when it is not in it. */
+static bool
+key_position(const struct layout *layout, const struct key *key,
+	     unsigned int *row, unsigned int *col)
+{
+	unsigned int i, r = 0, c = 0;
+
+	for (i = 0; i < layout->count; i++) {
+		if (&layout->keys[i] == key) {
+			*row = r;
+			*col = c;
+			return true;
+		}
+		c += layout->keys[i].width;
+		if (c >= layout->columns) {
+			r += 1;
+			c = 0;
+		}
+	}
+
+	return false;
+}
+
+/*
+ * Opens the long-press strip over the held key: its hint first, so a
+ * long-press released without sliding still types the digit as it always
+ * has, then the accented letters in the key's current case.
+ *
+ * The strip starts over the key and runs right, pulled back left where it
+ * would leave the sheet. It goes in the row above the key, as on Gboard;
+ * for the top row, which has nothing above it inside the panel surface
+ * (weston keeps the panel's first size, see PANEL_WIDTH), in the row below.
+ */
+static void
+popup_open(struct keyboard *keyboard, const struct key *key)
+{
+	const struct layout *layout = get_current_layout(keyboard->keyboard);
+	const char *const *more = key->more;
+	double panel_w = layout->columns * layout->unit - layout->sheet_inset;
+	unsigned int row, col, n = 0, i;
+	double x;
+
+	if (!key_position(layout, key, &row, &col))
+		return;
+
+	if (keyboard_shifted(keyboard) && key->more_upper)
+		more = key->more_upper;
+
+	if (key->hint)
+		keyboard->popup.entries[n++] = key->hint;
+	for (i = 0; more && more[i] && n < POPUP_MAX; i++)
+		keyboard->popup.entries[n++] = more[i];
+
+	if (n == 0)
+		return;
+
+	keyboard->popup.count = n;
+	keyboard->popup.selected = 0;
+	keyboard->popup.cell_w = key->width * layout->unit;
+
+	x = col * layout->unit;
+	if (x + n * keyboard->popup.cell_w > panel_w)
+		x = panel_w - n * keyboard->popup.cell_w;
+	if (x < layout->sheet_inset)
+		x = layout->sheet_inset;
+	keyboard->popup.x = x;
+	keyboard->popup.y = (row > 0 ? row - 1 : row + 1) * layout->row_h;
+
+	keyboard->popup.open = true;
+}
+
+/* Moves the selection to the cell under x, clamped to the strip's ends so
+ * a finger that overshoots keeps the last entry. */
+static void
+popup_track(struct keyboard *keyboard, float x)
+{
+	int cell;
+
+	if (!keyboard->popup.open)
+		return;
+
+	cell = (int)floor((x - keyboard->popup.x) / keyboard->popup.cell_w);
+	if (cell < 0)
+		cell = 0;
+	if (cell >= (int)keyboard->popup.count)
+		cell = (int)keyboard->popup.count - 1;
+
+	if ((unsigned int)cell != keyboard->popup.selected) {
+		keyboard->popup.selected = (unsigned int)cell;
+		widget_schedule_redraw(keyboard->widget);
+	}
+}
+
 static void
 longpress_handler(struct toytimer *tt)
 {
 	struct keyboard *keyboard =
 		container_of(tt, struct keyboard, longpress_timer);
 
-	if (!keyboard->held_key || !keyboard->held_key->hint)
+	if (!keyboard->held_key)
 		return;
 
-	commit_text(keyboard->keyboard, keyboard->held_key->hint);
-	keyboard->long_fired = true;
+	popup_open(keyboard, keyboard->held_key);
+	widget_schedule_redraw(keyboard->widget);
 }
 
 static void
@@ -895,16 +827,30 @@ arm_repeat(struct keyboard *keyboard)
 	toytimer_arm(&keyboard->repeat_timer, &its);
 }
 
+/* The globe: on to the next enabled language, back on its letters. */
+static void
+language_next(struct keyboard *keyboard)
+{
+	struct virtual_keyboard *vk = keyboard->keyboard;
+
+	if (vk->language_count < 2)
+		return;
+
+	vk->language_index = (vk->language_index + 1) % vk->language_count;
+	keyboard->state = KEYBOARD_STATE_DEFAULT;
+	announce_layout(vk);
+}
+
 static void
 key_press(struct keyboard *keyboard, uint32_t time, const struct key *key)
 {
 	keyboard->held_key = key;
-	keyboard->long_fired = false;
 	keyboard->held_time = time;
+	keyboard->popup.open = false;
 
 	switch (key->key_type) {
 	case keytype_default:
-		if (key->hint)
+		if (key->hint || key->more)
 			toytimer_arm_once_usec(&keyboard->longpress_timer,
 					       LONGPRESS_USEC);
 		break;
@@ -939,6 +885,9 @@ key_press(struct keyboard *keyboard, uint32_t time, const struct key *key)
 	case keytype_page:
 		keyboard->state = key->page;
 		break;
+	case keytype_lang:
+		language_next(keyboard);
+		break;
 	case keytype_space:
 	case keytype_spacer:
 		break;
@@ -958,11 +907,15 @@ key_release(struct keyboard *keyboard, uint32_t time)
 	switch (key->key_type) {
 	case keytype_default:
 		toytimer_disarm(&keyboard->longpress_timer);
-		if (keyboard->long_fired)
-			break;
 
-		commit_text(keyboard->keyboard,
-			    label_from_key(keyboard, key));
+		if (keyboard->popup.open) {
+			commit_text(keyboard->keyboard,
+				    keyboard->popup.entries[keyboard->popup.selected]);
+			keyboard->popup.open = false;
+		} else {
+			commit_text(keyboard->keyboard,
+				    label_from_key(keyboard, key));
+		}
 
 		/* one-shot shift; caps lock stays */
 		if (keyboard->state == KEYBOARD_STATE_UPPERCASE)
@@ -995,6 +948,8 @@ lookup_key(const struct layout *layout, double x, double y)
 	if (row < 0 || x < 0)
 		return NULL;
 
+	/* a zero-width key never takes col below zero, so the hidden
+	 * globe is skipped here without a special case */
 	for (i = 0; i < layout->count; ++i) {
 		col -= layout->keys[i].width;
 		if (col < 0)
@@ -1049,6 +1004,19 @@ button_handler(struct widget *widget,
 	handle_press(keyboard, time, x, y, state);
 }
 
+static int
+motion_handler(struct widget *widget, struct input *input,
+	       uint32_t time, float x, float y, void *data)
+{
+	struct keyboard *keyboard = data;
+	struct rectangle allocation;
+
+	widget_get_allocation(keyboard->widget, &allocation);
+	popup_track(keyboard, x - allocation.x);
+
+	return CURSOR_LEFT_PTR;
+}
+
 static void
 touch_down_handler(struct widget *widget, struct input *input,
 		   uint32_t serial, uint32_t time, int32_t id,
@@ -1069,6 +1037,18 @@ touch_up_handler(struct widget *widget, struct input *input,
 
 	handle_press(keyboard, time, 0, 0,
 		     WL_POINTER_BUTTON_STATE_RELEASED);
+}
+
+static void
+touch_motion_handler(struct widget *widget, struct input *input,
+		     uint32_t time, int32_t id,
+		     float x, float y, void *data)
+{
+	struct keyboard *keyboard = data;
+	struct rectangle allocation;
+
+	widget_get_allocation(keyboard->widget, &allocation);
+	popup_track(keyboard, x - allocation.x);
 }
 
 static void
@@ -1118,24 +1098,10 @@ handle_commit_state(void *data,
 		    uint32_t serial)
 {
 	struct virtual_keyboard *keyboard = data;
-	const struct layout *layout;
 
 	keyboard->serial = serial;
 
-	layout = get_current_layout(keyboard);
-
-	window_schedule_resize(keyboard->keyboard->window,
-			       layout->columns * layout->unit,
-			       layout->rows * layout->row_h);
-
-	zwp_input_method_context_v1_language(context,
-					     keyboard->serial,
-					     layout->language);
-	zwp_input_method_context_v1_text_direction(context,
-						   keyboard->serial,
-						   layout->text_direction);
-
-	widget_schedule_redraw(keyboard->keyboard->widget);
+	announce_layout(keyboard);
 }
 
 static void
@@ -1170,10 +1136,12 @@ input_method_activate(void *data,
 {
 	struct virtual_keyboard *keyboard = data;
 	struct wl_array modifiers_map;
-	const struct layout *layout;
 	const char *start_state = getenv("WESTON_KEYBOARD_START_STATE");
+	const char *start_lang = getenv("WESTON_KEYBOARD_START_LANG");
+	int i;
 
-	/* debug hook so non-default states can be screenshotted headlessly */
+	/* debug hooks so non-default states and languages can be
+	 * screenshotted headlessly */
 	if (start_state && !strcmp(start_state, "symbols"))
 		keyboard->keyboard->state = KEYBOARD_STATE_SYMBOLS;
 	else if (start_state && !strcmp(start_state, "symbols2"))
@@ -1182,7 +1150,11 @@ input_method_activate(void *data,
 		keyboard->keyboard->state = KEYBOARD_STATE_UPPERCASE;
 	else
 		keyboard->keyboard->state = KEYBOARD_STATE_DEFAULT;
+	for (i = 0; start_lang && i < keyboard->language_count; i++)
+		if (!strcmp(start_lang, keyboard->languages[i]->code))
+			keyboard->language_index = i;
 	keyboard->keyboard->held_key = NULL;
+	keyboard->keyboard->popup.open = false;
 	toytimer_disarm(&keyboard->keyboard->longpress_timer);
 	toytimer_disarm(&keyboard->keyboard->repeat_timer);
 
@@ -1211,20 +1183,7 @@ input_method_activate(void *data,
 	keyboard->keysym.shift_mask = keysym_modifiers_get_mask(&modifiers_map, "Shift");
 	wl_array_release(&modifiers_map);
 
-	layout = get_current_layout(keyboard);
-
-	window_schedule_resize(keyboard->keyboard->window,
-			       layout->columns * layout->unit,
-			       layout->rows * layout->row_h);
-
-	zwp_input_method_context_v1_language(context,
-					     keyboard->serial,
-					     layout->language);
-	zwp_input_method_context_v1_text_direction(context,
-						   keyboard->serial,
-						   layout->text_direction);
-
-	widget_schedule_redraw(keyboard->keyboard->widget);
+	announce_layout(keyboard);
 }
 
 static void
@@ -1240,6 +1199,7 @@ input_method_deactivate(void *data,
 	toytimer_disarm(&keyboard->keyboard->longpress_timer);
 	toytimer_disarm(&keyboard->keyboard->repeat_timer);
 	keyboard->keyboard->held_key = NULL;
+	keyboard->keyboard->popup.open = false;
 
 	zwp_input_method_context_v1_destroy(keyboard->context);
 	keyboard->context = NULL;
@@ -1330,8 +1290,10 @@ keyboard_create(struct virtual_keyboard *virtual_keyboard)
 	widget_set_redraw_handler(keyboard->widget, redraw_handler);
 	widget_set_resize_handler(keyboard->widget, resize_handler);
 	widget_set_button_handler(keyboard->widget, button_handler);
+	widget_set_motion_handler(keyboard->widget, motion_handler);
 	widget_set_touch_down_handler(keyboard->widget, touch_down_handler);
 	widget_set_touch_up_handler(keyboard->widget, touch_up_handler);
+	widget_set_touch_motion_handler(keyboard->widget, touch_motion_handler);
 
 	/* after virtual_keyboard->keyboard is set: the layout depends on
 	 * the page the keyboard is on */
@@ -1365,12 +1327,45 @@ keyboard_destroy(struct virtual_keyboard *virtual_keyboard)
 	free(virtual_keyboard->keyboard);
 }
 
+static void
+report_unknown_language(const char *token, size_t len)
+{
+	fprintf(stderr, "centroidx-keyboard: ignoring unknown keyboard "
+		"layout '%.*s'\n", (int)len, token);
+}
+
+/*
+ * KEYBOARD_LAYOUTS reaches this process through weston, which starts the
+ * input method with its own environment. The weston wrapper has already
+ * resolved the station's default to the front of the list, so all that is
+ * left here is to take the list in order. Unset — an image run without the
+ * wrapper — gives the English-only keyboard this client always was.
+ */
+static void
+languages_init(struct virtual_keyboard *virtual_keyboard)
+{
+	virtual_keyboard->language_count =
+		parse_keyboard_layouts(getenv("KEYBOARD_LAYOUTS"),
+				       virtual_keyboard->languages,
+				       LANGUAGE_MAX, report_unknown_language);
+
+	if (virtual_keyboard->language_count == 0) {
+		virtual_keyboard->languages[0] = &languages[0];
+		virtual_keyboard->language_count = 1;
+	}
+	virtual_keyboard->language_index = 0;
+
+	languages_set_globe(virtual_keyboard->language_count > 1);
+}
+
 int
 main(int argc, char *argv[])
 {
 	struct virtual_keyboard virtual_keyboard;
 
 	memset(&virtual_keyboard, 0, sizeof virtual_keyboard);
+
+	languages_init(&virtual_keyboard);
 
 	virtual_keyboard.display = display_create(&argc, argv);
 	if (virtual_keyboard.display == NULL) {

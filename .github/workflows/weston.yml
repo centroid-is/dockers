@@ -36,8 +36,25 @@ jobs:
       - name: Test weston-wrapper.sh
         run: sh weston/test/wrapper-test.sh
 
+  # The keyboard's layout tables are plain data nothing else checks: a row
+  # that does not add up to the grid silently shifts every key after it, and
+  # the image build compiles them without complaint. Compile the header on
+  # its own and assert the invariants.
+  keyboard-layouts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check the on-screen keyboard layouts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+          cc -std=gnu11 -Wall -Wextra -Werror -Wno-missing-field-initializers             -o "$RUNNER_TEMP/layouts-check" weston/keyboard/test/layouts-check.c
+          "$RUNNER_TEMP/layouts-check"
+
   build-and-push:
-    needs: test
+    needs: [test, keyboard-layouts]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
