@@ -473,6 +473,23 @@ draw_key(struct keyboard *keyboard,
 				      y + 15);
 			cairo_show_text(cr, key->hint);
 		}
+
+		/* a language letter reached by long-press, in the bottom-right
+		 * corner, following shift like the label does */
+		if (key->marked && key->more && key->more[0]) {
+			const char *mark = key->more[0];
+
+			if (keyboard_shifted(keyboard) && key->more_upper)
+				mark = key->more_upper[0];
+
+			cairo_set_source_rgb(cr, COL(color_hint));
+			cairo_set_font_size(cr, 11);
+			cairo_text_extents(cr, mark, &extents);
+			cairo_move_to(cr,
+				      x + w - extents.width - 7,
+				      y + h - 6);
+			cairo_show_text(cr, mark);
+		}
 		break;
 	}
 

@@ -127,6 +127,10 @@ check_layout(const char *name, const struct layout *layout,
 			      name, key->hint);
 		}
 
+		CHECK(!key->marked || (key->more && key->more[0]),
+		      "%s: '%s' is marked but has no long-press alternate",
+		      name, key->label);
+
 		if (key->more)
 			check_more(name, layout, key);
 		else
@@ -149,6 +153,27 @@ check_layout(const char *name, const struct layout *layout,
 	CHECK(layout->rows * layout->row_h == panel_height,
 	      "%s: %.0f px tall, the other pages are %.0f", name,
 	      layout->rows * layout->row_h, panel_height);
+}
+
+/* Every letter in want is the visible corner mark of some key. */
+static void
+expect_marks(const char *name, const struct layout *layout,
+	     const char *const *want)
+{
+	unsigned int i;
+
+	for (; *want; want++) {
+		bool found = false;
+
+		for (i = 0; i < layout->count; i++) {
+			const struct key *key = &layout->keys[i];
+
+			if (key->marked && key->more &&
+			    !strcmp(key->more[0], *want))
+				found = true;
+		}
+		CHECK(found, "%s: '%s' is not marked on any key", name, *want);
+	}
 }
 
 static unsigned int
@@ -223,6 +248,10 @@ main(void)
 	for (i = 0; i < LANGUAGE_COUNT; i++)
 		check_layout(languages[i].code, languages[i].alpha,
 			     panel_height);
+
+	expect_marks("pl", &pl_layout,
+		     MORE("ą", "ć", "ę", "ł", "ń", "ó", "ś", "ż"));
+	expect_marks("is", &is_layout, MORE("á", "é", "í", "ó", "ú", "ý"));
 
 	check_layout("symbols", &symbols_layout, panel_height);
 	check_layout("symbols2", &symbols2_layout, panel_height);

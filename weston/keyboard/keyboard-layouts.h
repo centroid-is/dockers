@@ -115,6 +115,13 @@ struct key {
 	 * of a commit_string. */
 	const char *const *more;
 	const char *const *more_upper;
+
+	/* draws the first long-press alternate small in the bottom-right
+	 * corner. Set on a language's own letters that are reached only by
+	 * long-press, so the sheet shows where they are: Gboard leaves them
+	 * invisible until the press, and an operator at a panel does not know
+	 * to look. */
+	bool marked;
 };
 
 struct layout {
@@ -232,15 +239,16 @@ static struct key en_keys[] = {
 };
 
 /*
- * Polish: Gboard gives Polish the English sheet unchanged. The nine Polish
- * letters are the first long-press alternate of their base letter.
+ * Polish: Gboard gives Polish the English sheet unchanged. The Polish letters
+ * are the first long-press alternate of their base letter, and marked in that
+ * key's corner (ź is the second alternate on z, after ż).
  */
 static struct key pl_keys[] = {
 	{ keytype_default, "q", "Q", 2, "1"},
 	{ keytype_default, "w", "W", 2, "2"},
 	{ keytype_default, "e", "E", 2, "3",
 	  .more = MORE("ę", "è", "é", "ê", "ë", "ė", "ē"),
-	  .more_upper = MORE("Ę", "È", "É", "Ê", "Ë", "Ė", "Ē")},
+	  .more_upper = MORE("Ę", "È", "É", "Ê", "Ë", "Ė", "Ē"), .marked = true},
 	{ keytype_default, "r", "R", 2, "4"},
 	{ keytype_default, "t", "T", 2, "5"},
 	{ keytype_default, "y", "Y", 2, "6"},
@@ -248,16 +256,16 @@ static struct key pl_keys[] = {
 	{ keytype_default, "i", "I", 2, "8"},
 	{ keytype_default, "o", "O", 2, "9",
 	  .more = MORE("ó", "ö", "ô", "ò", "õ", "œ", "ø", "ō"),
-	  .more_upper = MORE("Ó", "Ö", "Ô", "Ò", "Õ", "Œ", "Ø", "Ō")},
+	  .more_upper = MORE("Ó", "Ö", "Ô", "Ò", "Õ", "Œ", "Ø", "Ō"), .marked = true},
 	{ keytype_default, "p", "P", 2, "0"},
 	{ keytype_spacer, "", "", 6},
 
 	{ keytype_spacer, "", "", 1},
 	{ keytype_default, "a", "A", 2,
 	  .more = MORE("ą", "á", "à", "â", "ä", "æ", "ã", "å", "ā"),
-	  .more_upper = MORE("Ą", "Á", "À", "Â", "Ä", "Æ", "Ã", "Å", "Ā")},
+	  .more_upper = MORE("Ą", "Á", "À", "Â", "Ä", "Æ", "Ã", "Å", "Ā"), .marked = true},
 	{ keytype_default, "s", "S", 2,
-	  .more = MORE("ś", "ß", "š"), .more_upper = MORE("Ś", "ẞ", "Š")},
+	  .more = MORE("ś", "ß", "š"), .more_upper = MORE("Ś", "ẞ", "Š"), .marked = true},
 	{ keytype_default, "d", "D", 2},
 	{ keytype_default, "f", "F", 2},
 	{ keytype_default, "g", "G", 2},
@@ -265,20 +273,20 @@ static struct key pl_keys[] = {
 	{ keytype_default, "j", "J", 2},
 	{ keytype_default, "k", "K", 2},
 	{ keytype_default, "l", "L", 2,
-	  .more = MORE("ł"), .more_upper = MORE("Ł")},
+	  .more = MORE("ł"), .more_upper = MORE("Ł"), .marked = true},
 	{ keytype_spacer, "", "", 1},
 	{ keytype_spacer, "", "", 6},
 
 	{ keytype_switch, "", "", 3},
 	{ keytype_default, "z", "Z", 2,
-	  .more = MORE("ż", "ź", "ž"), .more_upper = MORE("Ż", "Ź", "Ž")},
+	  .more = MORE("ż", "ź", "ž"), .more_upper = MORE("Ż", "Ź", "Ž"), .marked = true},
 	{ keytype_default, "x", "X", 2},
 	{ keytype_default, "c", "C", 2,
-	  .more = MORE("ć", "ç", "č"), .more_upper = MORE("Ć", "Ç", "Č")},
+	  .more = MORE("ć", "ç", "č"), .more_upper = MORE("Ć", "Ç", "Č"), .marked = true},
 	{ keytype_default, "v", "V", 2},
 	{ keytype_default, "b", "B", 2},
 	{ keytype_default, "n", "N", 2,
-	  .more = MORE("ń", "ñ"), .more_upper = MORE("Ń", "Ñ")},
+	  .more = MORE("ń", "ñ"), .more_upper = MORE("Ń", "Ñ"), .marked = true},
 	{ keytype_default, "m", "M", 2},
 	{ keytype_backspace, "", "", 3, NULL, XKB_KEY_BackSpace},
 	{ keytype_arrow, "Home", "Home", 2, NULL, XKB_KEY_Home},
@@ -302,35 +310,36 @@ static struct key pl_keys[] = {
  * so the home row loses the stagger, as it does on Gboard's Nordic sheets;
  * þ takes the eighth slot of the bottom letter row. The navigation cluster
  * keeps its 6 units, which at this unit is 15 px narrower than on the
- * 26-unit pages.
+ * 26-unit pages. The accented vowels are long-press alternates, marked in
+ * the corner like the Polish letters.
  */
 static struct key is_keys[] = {
 	{ keytype_default, "q", "Q", 2, "1"},
 	{ keytype_default, "w", "W", 2, "2"},
 	{ keytype_default, "e", "E", 2, "3",
 	  .more = MORE("é", "ë", "è", "ê", "ę", "ė", "ē"),
-	  .more_upper = MORE("É", "Ë", "È", "Ê", "Ę", "Ė", "Ē")},
+	  .more_upper = MORE("É", "Ë", "È", "Ê", "Ę", "Ė", "Ē"), .marked = true},
 	{ keytype_default, "r", "R", 2, "4"},
 	{ keytype_default, "t", "T", 2, "5",
 	  .more = MORE("þ"), .more_upper = MORE("Þ")},
 	{ keytype_default, "y", "Y", 2, "6",
-	  .more = MORE("ý", "ÿ"), .more_upper = MORE("Ý", "Ÿ")},
+	  .more = MORE("ý", "ÿ"), .more_upper = MORE("Ý", "Ÿ"), .marked = true},
 	{ keytype_default, "u", "U", 2, "7",
 	  .more = MORE("ú", "ü", "û", "ù", "ū"),
-	  .more_upper = MORE("Ú", "Ü", "Û", "Ù", "Ū")},
+	  .more_upper = MORE("Ú", "Ü", "Û", "Ù", "Ū"), .marked = true},
 	{ keytype_default, "i", "I", 2, "8",
 	  .more = MORE("í", "ï", "î", "ì", "į", "ī"),
-	  .more_upper = MORE("Í", "Ï", "Î", "Ì", "Į", "Ī")},
+	  .more_upper = MORE("Í", "Ï", "Î", "Ì", "Į", "Ī"), .marked = true},
 	{ keytype_default, "o", "O", 2, "9",
 	  .more = MORE("ó", "ö", "ô", "ò", "õ", "œ", "ø", "ō"),
-	  .more_upper = MORE("Ó", "Ö", "Ô", "Ò", "Õ", "Œ", "Ø", "Ō")},
+	  .more_upper = MORE("Ó", "Ö", "Ô", "Ò", "Õ", "Œ", "Ø", "Ō"), .marked = true},
 	{ keytype_default, "p", "P", 2, "0"},
 	{ keytype_default, "ð", "Ð", 2},
 	{ keytype_spacer, "", "", 6},
 
 	{ keytype_default, "a", "A", 2,
 	  .more = MORE("á", "ä", "æ", "å", "à", "â", "ã", "ā"),
-	  .more_upper = MORE("Á", "Ä", "Æ", "Å", "À", "Â", "Ã", "Ā")},
+	  .more_upper = MORE("Á", "Ä", "Æ", "Å", "À", "Â", "Ã", "Ā"), .marked = true},
 	{ keytype_default, "s", "S", 2},
 	{ keytype_default, "d", "D", 2,
 	  .more = MORE("ð"), .more_upper = MORE("Ð")},
