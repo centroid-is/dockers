@@ -89,18 +89,51 @@
             UI.rfb.sendCredentials(have);
         };
 
+        // Typed credentials are held here until the server accepts them.
+        // Storing them on submit remembered a mistyped password, and
+        // UI.credentials above then resent it on every connect without ever
+        // showing the prompt again -- the only way out was the console.
+        let typed = null;
+
         UI.setCredentials = (e) => {
             if (REMEMBER) {
                 // Read before the original runs -- it clears the password field.
-                const u = document.getElementById('noVNC_username_input').value;
-                const p = document.getElementById('noVNC_password_input').value;
-                if (u !== '') { store('username', u); }
-                if (p !== '') { store('password', p); }
+                typed = {
+                    username: document.getElementById('noVNC_username_input').value,
+                    password: document.getElementById('noVNC_password_input').value,
+                };
             }
             return origSetCredentials(e);
         };
 
-        // Escape hatch: centroidxForget() from the console clears both.
+        const origConnectFinished = UI.connectFinished.bind(UI);
+        const origSecurityFailed  = UI.securityFailed.bind(UI);
+
+        UI.connectFinished = (e) => {
+            if (REMEMBER && typed) {
+                if (typed.username !== '') { store('username', typed.username); }
+                if (typed.password !== '') { store('password', typed.password); }
+            }
+            typed = null;
+            return origConnectFinished(e);
+        };
+
+        // Rejected: forget what was sent, whether typed or remembered, so the
+        // next connect prompts. Covers a password changed on the station too.
+        // The server key stays pinned -- the handshake got past it.
+        UI.securityFailed = (e) => {
+            typed = null;
+            if (REMEMBER) {
+                Log.Warn("Credentials rejected; forgetting the remembered ones");
+                ['username', 'password'].forEach(n => {
+                    try { localStorage.removeItem(KEY(n)); } catch (err) { /* private mode */ }
+                });
+            }
+            return origSecurityFailed(e);
+        };
+
+        // Escape hatch: centroidxForget() from the console clears credentials
+        // and the pinned server key.
         window.centroidxForget = () => {
             ['username', 'password', 'serverkey'].forEach(n => localStorage.removeItem(KEY(n)));
             return 'cleared';
