@@ -63,6 +63,10 @@ weston_alive() {
 }
 
 paste_len() { $WEX sh -c 'wl-paste -n 2>/dev/null | wc -c' 2>/dev/null | tr -d ' \r' || echo "?"; }
+# The same with a deadline: a compositor that no longer answers fails the
+# check (timeout kills wl-paste, the count comes back short) instead of
+# hanging the script. Its container is "running" either way.
+paste_len_within() { $WEX sh -c "timeout $1 wl-paste -n 2>/dev/null | wc -c" 2>/dev/null | tr -d ' \r' || echo "?"; }
 
 echo "== a short selection survives its publisher, at the right length =="
 start_weston
@@ -101,6 +105,53 @@ if [ "$(weston_alive)" = "running" ]; then
   check "and the selection still reads back whole" "$(paste_len)" "$ABORT_LEN"
 fi
 docker rm -f vncclient >/dev/null 2>&1 || true
+
+echo "== a publisher that withdraws its selection must not take weston with it =="
+# The owner's wl_data_source going away is not the same event as another
+# client taking the selection: the seat's selection passes through NULL, and
+# libweston's clipboard.c answers that by publishing the copy it kept, from
+# inside the signal. This backend's listener then runs twice, and it used to
+# close the first read under clipboard.c's write -- SIGPIPE in the compositor,
+# exit 141. flutter-elinux destroys its old source on every copy after the
+# first, so on a station this was the second Ctrl+C. Killing wl-copy is the
+# same event without the application.
+start_weston
+WITHDRAW_TEXT='fra-riggnum-þðá-2026'
+round=0
+while [ $round -lt 5 ]; do
+  round=$((round + 1))
+  $WEX sh -c "printf '%s' '$WITHDRAW_TEXT' | wl-copy" >/dev/null 2>&1 || true
+  sleep 1
+  $WEX sh -c 'kill $(pidof wl-copy)' >/dev/null 2>&1 || true
+  sleep 1
+  [ "$(weston_alive)" = "running" ] || break
+done
+check "weston after $round publishers withdrew" "$(weston_alive)" "running"
+if [ "$(weston_alive)" = "running" ]; then
+  check "and the retained copy still pastes" "$(paste_len)" "$SHORT_LEN"
+fi
+
+echo "== a withdrawn selection larger than a pipe buffer must not hang weston =="
+# clipboard.c serves the copy it kept with a blocking write() from the
+# compositor's own event loop. Until 0008 the bridge read that copy as well,
+# over a pipe that only this same event loop drains, so a selection past the
+# pipe's capacity (64 KiB) parked the compositor inside write() for good:
+# container "running", docker none the wiser, every client dead. The 23 bytes
+# above cannot see that, and neither can the container's status, so the
+# paste has to come back within a deadline and at the right length. 12 MB is
+# also past the bridge's own 10 MB limit, so the drain of 0007 is in play too.
+start_weston
+for size in 200000 12000000; do
+  $WEX sh -c "yes | head -c $size | wl-copy" >/dev/null 2>&1 || true
+  sleep 2
+  check "$size bytes while the publisher holds it" "$(paste_len_within 5)" "$size"
+  $WEX sh -c 'kill $(pidof wl-copy)' >/dev/null 2>&1 || true
+  sleep 2
+  got=$(paste_len_within 5)
+  check "$size bytes after the publisher withdrew, within 5s" "$got" "$size"
+  # a hung compositor stays hung; give the next size a live one
+  [ "$got" = "$size" ] || start_weston
+done
 
 echo "== a client with a data device on every seat gets one copy, not one each =="
 start_weston

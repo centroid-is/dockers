@@ -1,0 +1,50 @@
+From 11bb7bc8bb8c022ca0f861c51440ae45c6756abe Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B3n=20Bjarni=20Bjarnason?= <jon@centroid.is>
+Date: Sat, 10 Oct 2026 15:44:33 +0000
+Subject: [PATCH] vnc: skip the compositor's own clipboard sources
+
+The clipboard bridge reads every new selection over a pipe. When the
+owner of a selection withdraws it, libweston's clipboard.c republishes
+the copy it kept as a data source of its own, one with no wl_resource,
+and the bridge read that copy too.
+
+clipboard.c serves a send from the compositor's event loop with a
+blocking write() of the whole text into the fd it was handed. The pipe
+the bridge hands it is drained by that same event loop, so once the
+text exceeds the pipe's capacity (64 KiB) the write never returns: the
+compositor sits in write() for good, and every client with it. The
+process is alive, so docker does not restart it. Seen with a 70 KB
+selection; 60 KB got through.
+
+The VNC clients were sent that text when its owner published it, so
+there is nothing to read. Skip sources without a wl_resource. In
+libweston those are clipboard.c's retained copies and Xwayland's X11
+selections, and this compositor runs no Xwayland.
+---
+ libweston/backend-vnc/vnc.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/libweston/backend-vnc/vnc.c b/libweston/backend-vnc/vnc.c
+index 8ac5c01..176eefa 100644
+--- a/libweston/backend-vnc/vnc.c
++++ b/libweston/backend-vnc/vnc.c
+@@ -1473,6 +1473,16 @@ vnc_clipboard_selection(struct wl_listener *listener, void *data)
+ 	if (source->accept == vnc_data_source_accept)
+ 		return;
+ 
++	/* No wl_resource: the compositor's own source, which is libweston's
++	 * clipboard.c republishing the copy it kept when the owner withdrew.
++	 * The VNC clients were sent that text when its owner published it,
++	 * and reading it again would hang the compositor: clipboard.c serves
++	 * a send with a blocking write() from this event loop, into a pipe
++	 * that only this event loop drains, so past the pipe's capacity the
++	 * write never returns. */
++	if (!source->resource)
++		return;
++
+ 	for (i = 0; i < ARRAY_LENGTH(vnc_clipboard_mime_types) && !requested; i++) {
+ 		char **mime_type;
+ 
+-- 
+2.43.0
+
