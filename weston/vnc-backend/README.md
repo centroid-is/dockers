@@ -714,3 +714,92 @@ Built and exercised only through the image: the patch applies on 0001–0005
 in the Dockerfile's order, and the keymap `is,us,pl` with
 `grp:alt_shift_toggle` compiles in a headless start. Switching over a live
 noVNC session on a panel still wants an eyes-on check.
+
+# `0007` — draining a superseded clipboard read
+
+The second Ctrl+C in the HMI over noVNC took the panel down: weston exited
+141 with one line, `Broken pipe`, and the `flutter` container followed it
+(exit 133, a CEF `DCHECK` on the way out, which is the core dump a station
+keeps). The first Ctrl+C was always fine.
+
+## The chain
+
+`0005` reads every new selection over a pipe and sends it to the VNC clients.
+One read at a time: when a newer selection arrived, the read in flight was
+destroyed, which closed the pipe's read end. The write end is by then in the
+source's hands, and nothing says the source has written yet.
+
+The source is not always a client. `libweston/clipboard.c` keeps its own copy
+of every selection, so that it survives the application that made it, and
+publishes that copy when the owner's `wl_data_source` goes away:
+
+```c
+if (source == NULL) {
+        if (clipboard->source)
+                weston_seat_set_selection(seat, &clipboard->source->base,
+                                          clipboard->source->serial);
+        return;
+}
+```
+
+That is called from *inside* the `selection_signal` emit that announced the
+NULL, and `weston_seat_set_selection()` emits the signal again. So for one
+destroyed source this backend's listener runs twice:
+
+1. the owner destroys its source; `destroy_selection_data_source()` sets the
+   selection to NULL and emits;
+2. `clipboard.c`, first on the list because `weston_seat_init()` registers it,
+   publishes its copy — a nested emit, in which the bridge starts reading that
+   copy. `clipboard_source_send()` only queues the write, for the event loop;
+3. the outer emit moves on to the bridge's listener, which looks at the seat,
+   finds a selection and a read in flight, and supersedes it: read end closed;
+4. the event loop runs `clipboard_client_data()`, a bare `write()` into that
+   pipe. weston handles SIGPIPE nowhere (`0005`, "SIGPIPE"), so it dies.
+
+flutter-elinux destroys its previous `wl_data_source` before creating the next
+one on every `Clipboard.setData` (`ELinuxWindowWayland::SetClipboardData`), so
+its first copy takes no part in this and every later one walks straight into
+it. No timing is involved; it is every time.
+
+## The patch
+
+A read that is no longer wanted is kept open and drained to EOF with the data
+thrown away, instead of being closed under its writer. It costs one pipe until
+the writer is done. The same is done for a selection over the size limit,
+which was also hung up on mid-write — there the writer could just as well be
+the application, and flutter-elinux answers `wl_data_source.send` with a
+blocking `write()` and no SIGPIPE handling of its own.
+
+Draining also means the superseded read of step 2 sends nothing, so one copy
+is still one cut-text message.
+
+## Reproduced, and checked
+
+On the real images, `weston:latest` and `centroid-hmi:latest`, weston as
+`-B vnc,headless --fake-seat` with llvmpipe, an RFB client pressing real keys
+(Control_L down, c down, c up, Control_L up) into a focused text field:
+
+| build | result |
+|---|---|
+| before | first Ctrl+C: text arrives at the client. Second: **weston exit 141, `Broken pipe`**, flutter exit 133 four seconds later |
+| after | 17 Ctrl+C in a row, single, held and back to back: both containers up, the text arrives each time |
+
+Without the application, the same event is a publisher that exits:
+`wl-copy`, then kill it. `verify/retained.sh` now does that five times over —
+weston exited on the first round before the patch and survives all five
+after, with the retained copy still pasting at the right length.
+
+## Not tested, and not fixed
+
+As for every patch here: no station, no `drm,vnc` pair, no real GPU.
+
+`clipboard.c` itself is unchanged, because weston is not rebuilt, so its bare
+`write()` is still there for any *other* reader that closes early — a Wayland
+client that asks for a paste and exits mid-transfer of a selection larger
+than a pipe buffer. Nothing on a station does that today. The complete answer
+is weston ignoring SIGPIPE, which is upstream's to take; `backend-rdp` has the
+same exposure.
+
+A drained read lives until its writer closes the pipe. A client that accepts
+`send` and then never writes or closes holds one descriptor of the
+compositor's for as long as it runs.

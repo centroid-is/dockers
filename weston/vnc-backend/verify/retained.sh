@@ -102,6 +102,31 @@ if [ "$(weston_alive)" = "running" ]; then
 fi
 docker rm -f vncclient >/dev/null 2>&1 || true
 
+echo "== a publisher that withdraws its selection must not take weston with it =="
+# The owner's wl_data_source going away is not the same event as another
+# client taking the selection: the seat's selection passes through NULL, and
+# libweston's clipboard.c answers that by publishing the copy it kept, from
+# inside the signal. This backend's listener then runs twice, and it used to
+# close the first read under clipboard.c's write -- SIGPIPE in the compositor,
+# exit 141. flutter-elinux destroys its old source on every copy after the
+# first, so on a station this was the second Ctrl+C. Killing wl-copy is the
+# same event without the application.
+start_weston
+WITHDRAW_TEXT='fra-riggnum-þðá-2026'
+round=0
+while [ $round -lt 5 ]; do
+  round=$((round + 1))
+  $WEX sh -c "printf '%s' '$WITHDRAW_TEXT' | wl-copy" >/dev/null 2>&1 || true
+  sleep 1
+  $WEX sh -c 'kill $(pidof wl-copy)' >/dev/null 2>&1 || true
+  sleep 1
+  [ "$(weston_alive)" = "running" ] || break
+done
+check "weston after $round publishers withdrew" "$(weston_alive)" "running"
+if [ "$(weston_alive)" = "running" ]; then
+  check "and the retained copy still pastes" "$(paste_len)" "$SHORT_LEN"
+fi
+
 echo "== a client with a data device on every seat gets one copy, not one each =="
 start_weston
 start_client $SHORT_HEX

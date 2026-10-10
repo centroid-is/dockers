@@ -1,0 +1,203 @@
+From 0c796e5836d072324a4d6f8e81704d2cb3efee4e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B3n=20Bjarni=20Bjarnason?= <jon@centroid.is>
+Date: Sat, 10 Oct 2026 12:00:00 +0000
+Subject: [PATCH] vnc: drain a superseded clipboard read instead of closing it
+
+The clipboard bridge reads each new selection over a pipe and, when a
+newer selection arrives first, dropped the read in flight by closing
+the pipe's read end. The write end is by then in the source's hands,
+and the source may not have written yet, so its write raised SIGPIPE.
+
+The source is not always a client. libweston's clipboard.c keeps a copy
+of every selection and publishes that copy itself when the owner's
+wl_data_source is destroyed, calling weston_seat_set_selection() from
+inside the selection_signal emit. That nests a second emit, in which a
+read of the retained copy starts; the outer emit then reaches this
+backend's listener as well, which sees a selection set and a read in
+flight, and supersedes it. clipboard.c writes from the compositor's
+event loop with a bare write(), weston handles SIGPIPE nowhere, and the
+compositor exits 141 with "Broken pipe".
+
+Any client that replaces its own selection by destroying the old source
+first does this, which is what flutter-elinux does on every copy after
+its first. Seen as the panel going black on the second Ctrl+C.
+
+Keep the read open and drain it to EOF with the data thrown away. The
+same goes for a selection over the size limit, which was also hung up
+on mid-write.
+---
+ libweston/backend-vnc/vnc.c | 87 +++++++++++++++++++++++++++++++++++--
+ 1 file changed, 83 insertions(+), 4 deletions(-)
+
+diff --git a/libweston/backend-vnc/vnc.c b/libweston/backend-vnc/vnc.c
+index af8e426..8ac5c01 100644
+--- a/libweston/backend-vnc/vnc.c
++++ b/libweston/backend-vnc/vnc.c
+@@ -89,6 +89,9 @@ struct vnc_backend {
+ 	struct wl_list clipboard_seats;
+ 	struct wl_list clipboard_writes;
+ 	struct vnc_clipboard_read *clipboard_read;
++	/* Reads nobody wants the result of any more, still being drained;
++	 * see vnc_clipboard_read_abandon(). */
++	struct wl_list clipboard_drains;
+ 	struct wl_listener seat_created_listener;
+ 	/* Set only while a *new* peer seat is being created, so the
+ 	 * seat_created_signal that weston_seat_init() raises can be
+@@ -170,6 +173,9 @@ struct vnc_clipboard_read {
+ 	struct wl_event_source *event_source;
+ 	struct wl_array data;
+ 	int fd;
++	/* Superseded or oversized: read to the end and thrown away. */
++	bool abandoned;
++	struct wl_list link;	/* vnc_backend::clipboard_drains */
+ };
+ 
+ struct vnc_head {
+@@ -1313,7 +1319,9 @@ vnc_client_cut_text(struct nvnc_client *client, const char *text, uint32_t len)
+ static void
+ vnc_clipboard_read_destroy(struct vnc_clipboard_read *rtask)
+ {
+-	rtask->backend->clipboard_read = NULL;
++	if (rtask->backend->clipboard_read == rtask)
++		rtask->backend->clipboard_read = NULL;
++	wl_list_remove(&rtask->link);
+ 	if (rtask->event_source)
+ 		wl_event_source_remove(rtask->event_source);
+ 	if (rtask->fd != -1)
+@@ -1322,6 +1330,51 @@ vnc_clipboard_read_destroy(struct vnc_clipboard_read *rtask)
+ 	free(rtask);
+ }
+ 
++/*
++ * Stop caring about a read without closing it.
++ *
++ * The other end of this pipe is in somebody else's hands: the source was
++ * told to write its data there and may not have started yet. Closing the
++ * read end under it turns that write into SIGPIPE, and the writer is not
++ * always a client. libweston's own clipboard.c keeps a copy of every
++ * selection and publishes it itself the moment the owner's source goes away,
++ * writing from the compositor's event loop with a bare write() -- so a read
++ * of *that* source, closed early, killed the compositor (exit 141, "Broken
++ * pipe"). And that is exactly what a client replacing its own selection
++ * produces, because the listener below runs twice for it:
++ *
++ *   1. the client destroys its old wl_data_source; the seat's selection
++ *      goes to NULL and selection_signal is emitted;
++ *   2. clipboard.c, first on that signal, answers by publishing its retained
++ *      copy -- weston_seat_set_selection() from inside the emit, which emits
++ *      the signal again, nested, and a read of the retained copy starts here;
++ *   3. the outer emit then reaches this backend's listener too, which finds
++ *      a selection set and a read in flight, and supersedes it.
++ *
++ * So the read is kept open and drained to EOF with the data thrown away,
++ * which costs one pipe until the writer finishes. Wayland clients are owed
++ * the same courtesy: flutter-elinux answers wl_data_source.send with a
++ * blocking write() and no SIGPIPE handling either.
++ */
++static void
++vnc_clipboard_read_abandon(struct vnc_clipboard_read *rtask)
++{
++	struct vnc_backend *backend = rtask->backend;
++
++	if (rtask->abandoned)
++		return;
++
++	if (backend->clipboard_read == rtask)
++		backend->clipboard_read = NULL;
++
++	rtask->abandoned = true;
++	wl_array_release(&rtask->data);
++	wl_array_init(&rtask->data);
++
++	wl_list_remove(&rtask->link);
++	wl_list_insert(&backend->clipboard_drains, &rtask->link);
++}
++
+ /* Drain a Wayland client's selection and hand it to the VNC clients. */
+ static int
+ vnc_clipboard_read_handler(int fd, uint32_t mask, void *data)
+@@ -1330,6 +1383,19 @@ vnc_clipboard_read_handler(int fd, uint32_t mask, void *data)
+ 	struct vnc_backend *backend = rtask->backend;
+ 	size_t size;
+ 
++	while (rtask->abandoned) {
++		char scratch[4096];
++		ssize_t len;
++
++		len = read(fd, scratch, sizeof scratch);
++		if (len > 0 || (len < 0 && errno == EINTR))
++			continue;
++		if (len < 0 && errno == EAGAIN)
++			return 0;
++		/* EOF, or an error there is nobody left to report to. */
++		goto out;
++	}
++
+ 	for (;;) {
+ 		ssize_t len;
+ 		char *p;
+@@ -1357,7 +1423,11 @@ vnc_clipboard_read_handler(int fd, uint32_t mask, void *data)
+ 		rtask->data.size += len;
+ 		if (rtask->data.size > VNC_CLIPBOARD_MAX_SIZE) {
+ 			weston_log("VNC: clipboard selection too large, dropped\n");
+-			goto out;
++			/* Dropped, not hung up on: the source is still
++			 * writing. The fd stays readable, so the loop calls
++			 * straight back in to drain it. */
++			vnc_clipboard_read_abandon(rtask);
++			return 0;
+ 		}
+ 	}
+ 
+@@ -1418,9 +1488,10 @@ vnc_clipboard_selection(struct wl_listener *listener, void *data)
+ 	if (!requested)
+ 		return;
+ 
+-	/* One transfer at a time; a newer selection supersedes an older. */
++	/* One transfer at a time; a newer selection supersedes an older,
++	 * whose pipe is drained rather than closed under its writer. */
+ 	if (backend->clipboard_read)
+-		vnc_clipboard_read_destroy(backend->clipboard_read);
++		vnc_clipboard_read_abandon(backend->clipboard_read);
+ 
+ 	if (pipe2(pipe_fd, O_CLOEXEC) < 0) {
+ 		weston_log("VNC: clipboard pipe failed: %s\n", strerror(errno));
+@@ -1441,6 +1512,7 @@ vnc_clipboard_selection(struct wl_listener *listener, void *data)
+ 	rtask->backend = backend;
+ 	rtask->fd = pipe_fd[0];
+ 	wl_array_init(&rtask->data);
++	wl_list_init(&rtask->link);
+ 
+ 	rtask->event_source = wl_event_loop_add_fd(loop, pipe_fd[0],
+ 						   WL_EVENT_READABLE,
+@@ -1536,6 +1608,7 @@ vnc_clipboard_destroy(struct vnc_backend *backend)
+ {
+ 	struct vnc_clipboard_seat *cseat, *cseat_next;
+ 	struct vnc_clipboard_write *wtask, *wtask_next;
++	struct vnc_clipboard_read *rtask, *rtask_next;
+ 
+ 	if (!backend->seat_created_listener.notify)
+ 		return;
+@@ -1546,6 +1619,11 @@ vnc_clipboard_destroy(struct vnc_backend *backend)
+ 	if (backend->clipboard_read)
+ 		vnc_clipboard_read_destroy(backend->clipboard_read);
+ 
++	/* The compositor is going away, and its event loop with it; there is
++	 * nothing left to drain these from. */
++	wl_list_for_each_safe(rtask, rtask_next, &backend->clipboard_drains, link)
++		vnc_clipboard_read_destroy(rtask);
++
+ 	wl_list_for_each_safe(wtask, wtask_next, &backend->clipboard_writes, link)
+ 		vnc_clipboard_write_destroy(wtask);
+ 
+@@ -2059,6 +2137,7 @@ vnc_backend_create(struct weston_compositor *compositor,
+ 	backend->compositor = compositor;
+ 	wl_list_init(&backend->clipboard_seats);
+ 	wl_list_init(&backend->clipboard_writes);
++	wl_list_init(&backend->clipboard_drains);
+ 	backend->base.destroy = vnc_destroy;
+ 	backend->base.create_output = vnc_create_output;
+ 	backend->vnc_monitor_refresh_rate = config->refresh_rate * 1000;
+-- 
+2.43.0
+
