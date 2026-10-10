@@ -764,14 +764,20 @@ it. No timing is involved; it is every time.
 ## The patch
 
 A read that is no longer wanted is kept open and drained to EOF with the data
-thrown away, instead of being closed under its writer. It costs one pipe until
-the writer is done. The same is done for a selection over the size limit,
+thrown away, instead of being closed under its writer. Until the writer is
+done it costs the compositor two descriptors: the pipe's read end, and the dup
+that `wl_event_loop_add_fd()` keeps of every fd it watches. The write end is
+the writer's — `client_source_send()` passes it to the client and closes its
+own copy. The same is done for a selection over the size limit,
 which was also hung up on mid-write — there the writer could just as well be
 the application, and flutter-elinux answers `wl_data_source.send` with a
 blocking `write()` and no SIGPIPE handling of its own.
 
-Draining also means the superseded read of step 2 sends nothing, so one copy
-is still one cut-text message.
+Draining also meant the superseded read of step 2 sent nothing, so one copy
+was still one cut-text message. Since `0008` that read is never started: a
+withdrawal has the bridge reading nothing at all, and the drain is left with
+what it still covers — a client's source superseded before it has written,
+and a selection over the size limit.
 
 ## Reproduced, and checked
 
@@ -801,5 +807,111 @@ is weston ignoring SIGPIPE, which is upstream's to take; `backend-rdp` has the
 same exposure.
 
 A drained read lives until its writer closes the pipe. A client that accepts
-`send` and then never writes or closes holds one descriptor of the
-compositor's for as long as it runs.
+`send` and then never writes or closes holds two descriptors of the
+compositor's for as long as it runs, the read end and the event loop's dup of
+it. Measured with a source that sleeps on `send` and a `wl-copy` to supersede
+it: 4 pipe ends in `/proc/<pid>/fd` at rest, 6 while the drain waited, 4
+again once the sleeper was gone. (The two others of the 8 seen before the
+supersede were `clipboard.c`'s own read of the same source, which it closes
+when superseded — under its writer, so that is where the sleeper's SIGPIPE
+came from.)
+
+# `0008` — skipping the compositor's own clipboard sources
+
+`0007` stopped a withdrawal killing the compositor. It left it able to hang on
+one, which is worse: a hung weston is still `running` to docker, so
+`restart: unless-stopped` never fires, nothing is logged, no core is kept, and
+every client is stuck with it until somebody notices the panel.
+
+## The chain
+
+The same two listener runs as in `0007`, with the pipe now kept open:
+
+1. the owner withdraws; `clipboard.c` republishes its retained copy from
+   inside the signal, and the bridge asks that copy to `send` into a fresh
+   pipe;
+2. the outer run of the listener finds a read in flight, drains it, and asks
+   the same copy to `send` again, into a second pipe;
+3. `clipboard_source_send()` answers each with `clipboard_client_create()`,
+   which queues `clipboard_client_data()` on the compositor's event loop — one
+   plain `write()` of the whole text. The fd it writes to is blocking: the
+   bridge sets `O_NONBLOCK` on its read end only;
+4. a pipe holds 64 KiB. Up to that the `write()` returns at once and the
+   bridge drains the pipe on the next turn of the loop. Past it, `write()`
+   waits for a reader, the only reader is the bridge's handler on this same
+   event loop, and nothing runs again.
+
+In `/proc/<pid>/fd` that is eight pipe ends more than at rest — both pipes,
+read end and write end, each with the event loop's dup — and `wchan` says
+`anon_pipe_write`. `wl-paste` never returns, a VNC client's keys go nowhere,
+and the container is `running`.
+
+| withdrawn selection | `0007` alone | with `0008` |
+|---|---|---|
+| 60 KB | pastes back, 60000 | pastes back, 60000 |
+| 70 KB | **hung** in `write()`, `wl-paste` times out | pastes back, 70000 |
+| 200 KB | **hung** | pastes back, 200000 |
+| 12 MB, over the bridge's own 10 MB limit | **hung** | pastes back, 12000000 |
+
+Every time, not sometimes. The threshold is the pipe's capacity, not the
+bridge's limit.
+
+## The patch
+
+The retained copy is nothing the VNC clients lack: they were sent the text
+when its owner published it, and `clipboard.c` keeps it for Wayland clients,
+which read it over pipes of their own. So the bridge does not read it. A
+source of the compositor's own is told from a client's by the one thing it
+cannot have, a `wl_resource`:
+
+```c
+if (!source->resource)
+        return;
+```
+
+right after the `accept` check that already skips the bridge's own sources.
+In libweston only two kinds of source are made without a resource:
+`clipboard.c`'s retained copies and Xwayland's X11 selections
+(`xwayland/selection.c`), and this image runs no Xwayland. Were it ever to,
+X11 applications' copies would stop reaching the VNC clients, and this check
+would have to look at `send` instead.
+
+With it, a withdrawal starts no read at all — neither run of the listener
+finds anything to do — so `0007`'s drain is off that path. It stays for what
+it still covers: a client's own source superseded before it has written, and
+a selection over the bridge's limit. Both have a client at the far end of the
+pipe, which the compositor never waits on.
+
+Making the write end non-blocking instead would not have done:
+`clipboard_client_data()` takes a short or failed `write()` as the end of the
+transfer (`if (client->offset == size || len <= 0)`), so `EAGAIN` would have
+closed the pipe after the first 64 KiB and sent the VNC clients a truncated
+copy of text they already had.
+
+## Reproduced, and checked
+
+The table above is this image, `-B headless,vnc --fake-seat`: `wl-copy` N
+bytes, `kill` it, `timeout 5 wl-paste -n | wc -c`. `verify/retained.sh` now
+has that as a round of its own, at 200 KB and 12 MB, judged by whether the
+paste comes back within five seconds and at the right length — the 23-byte
+round and the container's status both pass on a hung compositor, which is
+how `0007` shipped without seeing this. Against `0007` alone it fails,
+`got 0, wanted 200000` and the same for 12 MB; with this patch every round
+of the script passes.
+
+What the earlier patches were for still holds on the same build: the HMI's
+Ctrl+C over RFB into a focused text field, sixteen single presses each
+answered with the text, then five held, both containers up throughout; twenty
+`wl-copy; kill; wl-copy` with no pause between; twenty withdrawals; and the
+descriptor count back at rest afterwards (4 pipe ends, as before any of it).
+
+## Not tested, and not fixed
+
+As for every patch here: no station, no `drm,vnc` pair, no real GPU.
+
+`clipboard.c`'s `write()` is still blocking, and still on the compositor's
+thread, for any Wayland client that asks for the retained copy over a
+blocking pipe and then stops reading without closing; the compositor would
+wait in `write()` for as long as that client held the pipe. `wl-paste` and the
+HMI read what they ask for, so nothing on a station does this. The answer is
+upstream's, in `clipboard.c`.

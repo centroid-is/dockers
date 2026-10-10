@@ -91,10 +91,14 @@ which is the part that matters: a selection served truncated or doubled reads
 correctly at a glance and is only caught by counting. It covers the selection
 this backend keeps serving after the client that published it has gone (short
 and 4 MiB), a requester killed mid-transfer, a publisher that exits while it
-holds the selection (`0007`: that used to be the end of the compositor), and
-three copies in a row on the client-facing side. It brings its own `westonc`/`vncclient` containers up and
-down, so it wants the `vnctest` network and the `wl-clipboard` image above,
-and nothing else running under those names.
+holds the selection (`0007`: that used to be the end of the compositor), the
+same with a selection larger than a pipe buffer (`0008`: that used to hang the
+compositor with its container still `running`, so the round is judged by the
+paste coming back within a deadline, not by `docker inspect`), and three
+copies in a row on the client-facing side. It brings its own
+`westonc`/`vncclient` containers up and down, so it wants the `vnctest`
+network and the `wl-clipboard` image above, and nothing else running under
+those names.
 
 ```sh
 sh retained.sh                 # against weston-clip-test
