@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B3n=20Bjarni=20Bjarnason?= <jon@centroid.is>
+Date: Sat, 10 Oct 2026 17:00:00 +0000
+Subject: [PATCH] CentroidX: a setting that switches the shared clipboard off
+
+The async clipboard is unconditional upstream: wherever the browser
+allows it, the local clipboard is sent to the server each time the
+canvas gains focus, and the server's clipboard is written to the local
+one.
+
+Add a shared_clipboard setting, on by default. It is read like every
+other setting (defaults.json, mandatory.json, the URL) and has no
+control in the settings panel. When it is off the async clipboard is
+never grabbed or written to, and the clipboard panel stays, which is
+what v1.7.0 did.
+
+Not upstream. Drop it if upstream grows a switch of its own.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/ui.js   | 16 ++++++++++++++++
+ core/rfb.js | 10 ++++++++--
+ 2 files changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/app/ui.js b/app/ui.js
+index bbdea60..ecb16fc 100644
+--- a/app/ui.js
++++ b/app/ui.js
+@@ -189,6 +189,7 @@ const UI = {
+         UI.initSetting('repeaterID', '');
+         UI.initSetting('reconnect', false);
+         UI.initSetting('reconnect_delay', 5000);
++        UI.initSetting('shared_clipboard', true);
+     },
+     // Adds a link to the label elements on the corresponding input elements
+     setupSettingLabels() {
+@@ -1077,6 +1078,7 @@ const UI = {
+                              url.href,
+                              { shared: UI.getSetting('shared'),
+                                repeaterID: UI.getSetting('repeaterID'),
++                               sharedClipboard: UI.sharedClipboard(),
+                                credentials: { password: password } });
+         } catch (exc) {
+             Log.Error("Failed to connect to server: " + exc);
+@@ -1779,7 +1781,21 @@ const UI = {
+         }
+     },
+ 
++    // The setting has no control in the settings panel, so getSetting()
++    // hands back whatever was stored: a boolean from defaults.json or
++    // mandatory.json, a string from the URL.
++    sharedClipboard() {
++        const val = UI.getSetting('shared_clipboard');
++        if (val === null || typeof val === 'undefined') return true;
++        return !(val.toString().toLowerCase() in
++                 {'0': 1, 'no': 1, 'false': 1, 'off': 1});
++    },
++
+     updateClipboard() {
++        if (!UI.sharedClipboard()) {
++            // Keep the clipboard panel, as before the async clipboard
++            return;
++        }
+         browserAsyncClipboardSupport()
+             .then((support) => {
+                 if (support === 'unsupported') {
+diff --git a/core/rfb.js b/core/rfb.js
+index 1073a87..02f533c 100644
+--- a/core/rfb.js
++++ b/core/rfb.js
+@@ -118,6 +118,8 @@ export default class RFB extends EventTargetMixin {
+         options = options || {};
+         this._rfbCredentials = options.credentials || {};
+         this._shared = 'shared' in options ? !!options.shared : true;
++        this._sharedClipboard = 'sharedClipboard' in options ?
++            !!options.sharedClipboard : true;
+         this._repeaterID = options.repeaterID || '';
+         this._wsProtocols = options.wsProtocols || [];
+ 
+@@ -268,7 +270,10 @@ export default class RFB extends EventTargetMixin {
+             throw exc;
+         }
+ 
+-        this._asyncClipboard = new AsyncClipboard(this._canvas);
++        // Without a target the async clipboard never listens for focus,
++        // so the local clipboard is never read.
++        this._asyncClipboard = new AsyncClipboard(
++            this._sharedClipboard ? this._canvas : null);
+         this._asyncClipboard.onpaste = this.clipboardPasteFrom.bind(this);
+ 
+         this._keyboard = new Keyboard(this._canvas);
+@@ -2335,7 +2340,8 @@ export default class RFB extends EventTargetMixin {
+ 
+     _writeClipboard(text) {
+         if (this._viewOnly) return;
+-        if (this._asyncClipboard.writeClipboard(text)) return;
++        if (this._sharedClipboard &&
++            this._asyncClipboard.writeClipboard(text)) return;
+         // Fallback clipboard
+         this.dispatchEvent(
+             new CustomEvent("clipboard", {detail: {text: text}})

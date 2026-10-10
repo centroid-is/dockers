@@ -3,5 +3,6 @@
   "autoconnect": "true",
   "reconnect": true,
   "show_dot": true,
-  "remember_credentials": true
+  "remember_credentials": true,
+  "shared_clipboard": true
 }
