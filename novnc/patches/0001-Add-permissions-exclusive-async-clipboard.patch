@@ -1,0 +1,651 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tobias <tobfa@cendio.se>
+Date: Tue, 10 Jun 2025 16:40:58 +0200
+Subject: [PATCH] Add permissions-exclusive async clipboard
+
+Clipboard permissions must be supported, with states "granted" or
+"prompt" for both write and read.
+---
+ core/clipboard.js       |  72 ++++++++++++++++++
+ core/rfb.js             |  29 ++++++--
+ core/util/browser.js    |  33 +++++++++
+ tests/test.browser.js   |  70 +++++++++++++++++-
+ tests/test.clipboard.js | 121 +++++++++++++++++++++++++++++++
+ tests/test.rfb.js       | 157 ++++++++++++++++++++++++++++++++++------
+ 6 files changed, 451 insertions(+), 31 deletions(-)
+ create mode 100644 core/clipboard.js
+ create mode 100644 tests/test.clipboard.js
+
+diff --git a/core/clipboard.js b/core/clipboard.js
+new file mode 100644
+index 0000000..ae3cad1
+--- /dev/null
++++ b/core/clipboard.js
+@@ -0,0 +1,72 @@
++/*
++ * noVNC: HTML5 VNC client
++ * Copyright (c) 2025 The noVNC authors
++ * Licensed under MPL 2.0 or any later version (see LICENSE.txt)
++ */
++
++import * as Log from './util/logging.js';
++import { browserAsyncClipboardSupport } from './util/browser.js';
++
++export default class AsyncClipboard {
++    constructor(target) {
++        this._target = target || null;
++
++        this._isAvailable = null;
++
++        this._eventHandlers = {
++            'focus': this._handleFocus.bind(this),
++        };
++
++        // ===== EVENT HANDLERS =====
++
++        this.onpaste = () => {};
++    }
++
++    // ===== PRIVATE METHODS =====
++
++    async _ensureAvailable() {
++        if (this._isAvailable !== null) return this._isAvailable;
++        try {
++            const status = await browserAsyncClipboardSupport();
++            this._isAvailable = (status === 'available');
++        } catch {
++            this._isAvailable = false;
++        }
++        return this._isAvailable;
++    }
++
++    async _handleFocus(event) {
++        if (!(await this._ensureAvailable())) return;
++        try {
++            const text = await navigator.clipboard.readText();
++            this.onpaste(text);
++        } catch (error) {
++            Log.Error("Clipboard read failed: ", error);
++        }
++    }
++
++    // ===== PUBLIC METHODS =====
++
++    writeClipboard(text) {
++        // Can lazily check cached availability
++        if (!this._isAvailable) return false;
++        navigator.clipboard.writeText(text)
++            .catch(error => Log.Error("Clipboard write failed: ", error));
++        return true;
++    }
++
++    grab() {
++        if (!this._target) return;
++        this._ensureAvailable()
++            .then((isAvailable) => {
++                if (isAvailable) {
++                    this._target.addEventListener('focus', this._eventHandlers.focus);
++                }
++            });
++    }
++
++    ungrab() {
++        if (!this._target) return;
++        this._target.removeEventListener('focus', this._eventHandlers.focus);
++    }
++}
+diff --git a/core/rfb.js b/core/rfb.js
+index 80011e4..1073a87 100644
+--- a/core/rfb.js
++++ b/core/rfb.js
+@@ -15,6 +15,7 @@ import { clientToElement } from './util/element.js';
+ import { setCapture } from './util/events.js';
+ import EventTargetMixin from './util/eventtarget.js';
+ import Display from "./display.js";
++import AsyncClipboard from "./clipboard.js";
+ import Inflator from "./inflator.js";
+ import Deflator from "./deflator.js";
+ import Keyboard from "./input/keyboard.js";
+@@ -164,6 +165,7 @@ export default class RFB extends EventTargetMixin {
+         this._sock = null;              // Websock object
+         this._display = null;           // Display object
+         this._flushing = false;         // Display flushing state
++        this._asyncClipboard = null;    // Async clipboard object
+         this._keyboard = null;          // Keyboard input handler object
+         this._gestures = null;          // Gesture input handler object
+         this._resizeObserver = null;    // Resize observer object
+@@ -266,6 +268,9 @@ export default class RFB extends EventTargetMixin {
+             throw exc;
+         }
+ 
++        this._asyncClipboard = new AsyncClipboard(this._canvas);
++        this._asyncClipboard.onpaste = this.clipboardPasteFrom.bind(this);
++
+         this._keyboard = new Keyboard(this._canvas);
+         this._keyboard.onkeyevent = this._handleKeyEvent.bind(this);
+         this._remoteCapsLock = null; // Null indicates unknown or irrelevant
+@@ -315,8 +320,10 @@ export default class RFB extends EventTargetMixin {
+             this._rfbConnectionState === "connected") {
+             if (viewOnly) {
+                 this._keyboard.ungrab();
++                this._asyncClipboard.ungrab();
+             } else {
+                 this._keyboard.grab();
++                this._asyncClipboard.grab();
+             }
+         }
+     }
+@@ -2208,7 +2215,10 @@ export default class RFB extends EventTargetMixin {
+         this._setDesktopName(name);
+         this._resize(width, height);
+ 
+-        if (!this._viewOnly) { this._keyboard.grab(); }
++        if (!this._viewOnly) {
++            this._keyboard.grab();
++            this._asyncClipboard.grab();
++        }
+ 
+         this._fbDepth = 24;
+ 
+@@ -2323,6 +2333,15 @@ export default class RFB extends EventTargetMixin {
+         return this._fail("Unexpected SetColorMapEntries message");
+     }
+ 
++    _writeClipboard(text) {
++        if (this._viewOnly) return;
++        if (this._asyncClipboard.writeClipboard(text)) return;
++        // Fallback clipboard
++        this.dispatchEvent(
++            new CustomEvent("clipboard", {detail: {text: text}})
++        );
++    }
++
+     _handleServerCutText() {
+         Log.Debug("ServerCutText");
+ 
+@@ -2342,9 +2361,7 @@ export default class RFB extends EventTargetMixin {
+                 return true;
+             }
+ 
+-            this.dispatchEvent(new CustomEvent(
+-                "clipboard",
+-                { detail: { text: text } }));
++            this._writeClipboard(text);
+ 
+         } else {
+             //Extended msg.
+@@ -2480,9 +2497,7 @@ export default class RFB extends EventTargetMixin {
+ 
+                     textData = textData.replaceAll("\r\n", "\n");
+ 
+-                    this.dispatchEvent(new CustomEvent(
+-                        "clipboard",
+-                        { detail: { text: textData } }));
++                    this._writeClipboard(textData);
+                 }
+             } else {
+                 return this._fail("Unexpected action in extended clipboard message: " + actions);
+diff --git a/core/util/browser.js b/core/util/browser.js
+index 63596d2..12f47a7 100644
+--- a/core/util/browser.js
++++ b/core/util/browser.js
+@@ -11,6 +11,39 @@
+ import * as Log from './logging.js';
+ import Base64 from '../base64.js';
+ 
++// Async clipboard detection
++
++/* Evaluates if there is browser support for the async clipboard API and
++ * relevant clipboard permissions. Returns 'unsupported' if permission states
++ * cannot be resolved. On the other hand, detecting 'granted' or 'prompt'
++ * permission states for both read and write indicates full API support with no
++ * imposed native browser paste prompt. Conversely, detecting 'denied' indicates
++ * the user elected to disable clipboard.
++ */
++export async function browserAsyncClipboardSupport() {
++    if (!(navigator?.permissions?.query &&
++          navigator?.clipboard?.writeText &&
++          navigator?.clipboard?.readText)) {
++        return 'unsupported';
++    }
++    try {
++        const writePerm = await navigator.permissions.query(
++            {name: "clipboard-write", allowWithoutGesture: true});
++        const readPerm = await navigator.permissions.query(
++            {name: "clipboard-read",  allowWithoutGesture: false});
++        if (writePerm.state === "denied" || readPerm.state  === "denied") {
++            return 'denied';
++        }
++        if ((writePerm.state === "granted" || writePerm.state === "prompt") &&
++            (readPerm.state  === "granted" || readPerm.state  === "prompt")) {
++            return 'available';
++        }
++    } catch {
++        return 'unsupported';
++    }
++    return 'unsupported';
++}
++
+ // Touch detection
+ export let isTouchDevice = ('ontouchstart' in document.documentElement) ||
+                                  // required for Chrome debugger
+diff --git a/tests/test.browser.js b/tests/test.browser.js
+index 692cc23..6c9bc56 100644
+--- a/tests/test.browser.js
++++ b/tests/test.browser.js
+@@ -1,6 +1,74 @@
+ import { isMac, isWindows, isIOS, isAndroid, isChromeOS,
+          isSafari, isFirefox, isChrome, isChromium, isOpera, isEdge,
+-         isGecko, isWebKit, isBlink } from '../core/util/browser.js';
++         isGecko, isWebKit, isBlink,
++         browserAsyncClipboardSupport } from '../core/util/browser.js';
++
++describe('Async clipboard', function () {
++    "use strict";
++
++    beforeEach(function () {
++        sinon.stub(navigator, "clipboard").value({
++            writeText: sinon.stub(),
++            readText: sinon.stub(),
++        });
++        sinon.stub(navigator, "permissions").value({
++            query: sinon.stub().resolves({ state: "granted" })
++        });
++    });
++
++    afterEach(function () {
++        sinon.restore();
++    });
++
++    it("queries permissions with correct parameters", async function () {
++        const queryStub = navigator.permissions.query;
++        await browserAsyncClipboardSupport();
++        expect(queryStub.firstCall).to.have.been.calledWithExactly({
++            name: "clipboard-write",
++            allowWithoutGesture: true
++        });
++        expect(queryStub.secondCall).to.have.been.calledWithExactly({
++            name: "clipboard-read",
++            allowWithoutGesture: false
++        });
++    });
++
++    it("is available when API present and permissions granted", async function () {
++        navigator.permissions.query.resolves({ state: "granted" });
++        const result = await browserAsyncClipboardSupport();
++        expect(result).to.equal('available');
++    });
++
++    it("is available when API present and permissions yield 'prompt'", async function () {
++        navigator.permissions.query.resolves({ state: "prompt" });
++        const result = await browserAsyncClipboardSupport();
++        expect(result).to.equal('available');
++    });
++
++    it("is unavailable when permissions denied", async function () {
++        navigator.permissions.query.resolves({ state: "denied" });
++        const result = await browserAsyncClipboardSupport();
++        expect(result).to.equal('denied');
++    });
++
++    it("is unavailable when permissions API fails", async function () {
++        navigator.permissions.query.rejects(new Error("fail"));
++        const result = await browserAsyncClipboardSupport();
++        expect(result).to.equal('unsupported');
++    });
++
++    it("is unavailable when write text API missing", async function () {
++        navigator.clipboard.writeText = undefined;
++        const result = await browserAsyncClipboardSupport();
++        expect(result).to.equal('unsupported');
++    });
++
++    it("is unavailable when read text API missing", async function () {
++        navigator.clipboard.readText = undefined;
++        const result = await browserAsyncClipboardSupport();
++        expect(result).to.equal('unsupported');
++    });
++});
+ 
+ describe('OS detection', function () {
+     let origNavigator;
+diff --git a/tests/test.clipboard.js b/tests/test.clipboard.js
+new file mode 100644
+index 0000000..1c173a8
+--- /dev/null
++++ b/tests/test.clipboard.js
+@@ -0,0 +1,121 @@
++import AsyncClipboard from '../core/clipboard.js';
++
++describe('Async Clipboard', function () {
++    "use strict";
++
++    let targetMock;
++    let clipboard;
++
++    beforeEach(function () {
++        sinon.stub(navigator, "clipboard").value({
++            writeText: sinon.stub().resolves(),
++            readText: sinon.stub().resolves(),
++        });
++
++        sinon.stub(navigator, "permissions").value({
++            query: sinon.stub(),
++        });
++
++        targetMock = document.createElement("canvas");
++        clipboard = new AsyncClipboard(targetMock);
++    });
++
++    afterEach(function () {
++        sinon.restore();
++        targetMock = null;
++        clipboard = null;
++    });
++
++    function stubClipboardPermissions(state) {
++        navigator.permissions.query
++            .withArgs({ name: 'clipboard-write', allowWithoutGesture: true })
++            .resolves({ state: state });
++        navigator.permissions.query
++            .withArgs({ name: 'clipboard-read', allowWithoutGesture: false })
++            .resolves({ state: state });
++    }
++
++    function nextTick() {
++        return new Promise(resolve => setTimeout(resolve, 0));
++    }
++
++    it('grab() adds listener if permissions granted', async function () {
++        stubClipboardPermissions('granted');
++
++        const addListenerSpy = sinon.spy(targetMock, 'addEventListener');
++        clipboard.grab();
++
++        await nextTick();
++
++        expect(addListenerSpy.calledWith('focus')).to.be.true;
++    });
++
++    it('grab() does not add listener if permissions denied', async function () {
++        stubClipboardPermissions('denied');
++
++        const addListenerSpy = sinon.spy(targetMock, 'addEventListener');
++        clipboard.grab();
++
++        await nextTick();
++
++        expect(addListenerSpy.calledWith('focus')).to.be.false;
++    });
++
++    it('focus event triggers onpaste() if permissions granted', async function () {
++        stubClipboardPermissions('granted');
++
++        const text = 'hello clipboard world';
++        navigator.clipboard.readText.resolves(text);
++
++        const spyPromise = new Promise(resolve => clipboard.onpaste = resolve);
++
++        clipboard.grab();
++
++        await nextTick();
++
++        targetMock.dispatchEvent(new Event('focus'));
++
++        const res = await spyPromise;
++        expect(res).to.equal(text);
++    });
++
++    it('focus event does not trigger onpaste() if permissions denied', async function () {
++        stubClipboardPermissions('denied');
++
++        const text = 'should not read';
++        navigator.clipboard.readText.resolves(text);
++
++        clipboard.onpaste = sinon.spy();
++
++        clipboard.grab();
++
++        await nextTick();
++
++        targetMock.dispatchEvent(new Event('focus'));
++
++        expect(clipboard.onpaste.called).to.be.false;
++    });
++
++    it('writeClipboard() calls navigator.clipboard.writeText() if permissions granted', async function () {
++        stubClipboardPermissions('granted');
++        clipboard._isAvailable = true;
++
++        const text = 'writing to clipboard';
++        const result = clipboard.writeClipboard(text);
++
++        expect(navigator.clipboard.writeText.calledWith(text)).to.be.true;
++        expect(result).to.be.true;
++    });
++
++    it('writeClipboard() does not call navigator.clipboard.writeText() if permissions denied', async function () {
++        stubClipboardPermissions('denied');
++        clipboard._isAvailable = false;
++
++        const text = 'should not write';
++        const result = clipboard.writeClipboard(text);
++
++        expect(navigator.clipboard.writeText.called).to.be.false;
++        expect(result).to.be.false;
++    });
++
++});
+diff --git a/tests/test.rfb.js b/tests/test.rfb.js
+index 2a7bbea..7aa54cd 100644
+--- a/tests/test.rfb.js
++++ b/tests/test.rfb.js
+@@ -3467,17 +3467,48 @@ describe('Remote Frame Buffer protocol client', function () {
+         });
+ 
+         describe('Normal clipboard handling receive', function () {
+-            it('should fire the clipboard callback with the retrieved text on ServerCutText', function () {
++            it('should not dispatch a clipboard event following successful async write clipboard', async function () {
++                client._viewOnly = false;
++                client._asyncClipboard = {
++                    writeClipboard: sinon.stub().returns(true),
++                };
+                 const expectedStr = 'cheese!';
+                 const data = [3, 0, 0, 0];
+                 push32(data, expectedStr.length);
+                 for (let i = 0; i < expectedStr.length; i++) { data.push(expectedStr.charCodeAt(i)); }
+-                const spy = sinon.spy();
+-                client.addEventListener("clipboard", spy);
++
++                const dispatchEventSpy = sinon.spy(client, 'dispatchEvent');
+ 
+                 client._sock._websocket._receiveData(new Uint8Array(data));
+-                expect(spy).to.have.been.calledOnce;
+-                expect(spy.args[0][0].detail.text).to.equal(expectedStr);
++
++                expect(client._asyncClipboard.writeClipboard.calledOnceWith(
++                    expectedStr
++                )).to.be.true;
++                expect(dispatchEventSpy.calledWith(
++                    new CustomEvent("clipboard", {detail: {expectedStr: expectedStr}})
++                )).to.be.false;
++            });
++
++            it('should dispatch a clipboard event following unsuccessful async write clipboard', async function () {
++                client._viewOnly = false;
++                client._asyncClipboard = {
++                    writeClipboard: sinon.stub().returns(false),
++                };
++                const expectedStr = 'cheese!';
++                const data = [3, 0, 0, 0];
++                push32(data, expectedStr.length);
++                for (let i = 0; i < expectedStr.length; i++) { data.push(expectedStr.charCodeAt(i)); }
++
++                const dispatchEventSpy = sinon.spy(client, 'dispatchEvent');
++
++                client._sock._websocket._receiveData(new Uint8Array(data));
++
++                expect(client._asyncClipboard.writeClipboard.calledOnceWith(
++                    expectedStr
++                )).to.be.true;
++                expect(dispatchEventSpy.calledOnceWith(
++                    new CustomEvent("clipboard", {detail: {expectedStr: expectedStr}})
++                )).to.be.true;
+             });
+         });
+ 
+@@ -3530,8 +3561,71 @@ describe('Remote Frame Buffer protocol client', function () {
+                     client._sock._websocket._receiveData(new Uint8Array(data));
+                 });
+ 
++                it('should not dispatch a clipboard event following successful async write clipboard', async function () {
++                    client._viewOnly = false;
++                    client._asyncClipboard = {
++                        writeClipboard: sinon.stub().returns(true),
++                    };
++                    let expectedData = "Schnitzel";
++                    let data = [3, 0, 0, 0];
++                    const flags = [0x10, 0x00, 0x00, 0x01];
++
++                    let text = encodeUTF8("Schnitzel");
++                    let deflatedText = deflateWithSize(text);
++
++                    // How much data we are sending.
++                    push32(data, toUnsigned32bit(-(4 + deflatedText.length)));
++
++                    data = data.concat(flags);
++                    data = data.concat(Array.from(deflatedText));
++
++                    const dispatchEventSpy = sinon.spy(client, 'dispatchEvent');
++
++                    client._sock._websocket._receiveData(new Uint8Array(data));
++
++                    expect(client._asyncClipboard.writeClipboard.calledOnceWith(
++                        expectedData
++                    )).to.be.true;
++                    expect(dispatchEventSpy.calledOnceWith(
++                        new CustomEvent("clipboard", {detail: {expectedData: expectedData}})
++                    )).to.be.false;
++                });
++                it('should dispatch a clipboard event following unsuccessful async write clipboard', async function () {
++                    client._viewOnly = false;
++                    client._asyncClipboard = {
++                        writeClipboard: sinon.stub().returns(false),
++                    };
++                    let expectedData = "Potatoes";
++                    let data = [3, 0, 0, 0];
++                    const flags = [0x10, 0x00, 0x00, 0x01];
++
++                    let text = encodeUTF8("Potatoes");
++                    let deflatedText = deflateWithSize(text);
++
++                    // How much data we are sending.
++                    push32(data, toUnsigned32bit(-(4 + deflatedText.length)));
++
++                    data = data.concat(flags);
++                    data = data.concat(Array.from(deflatedText));
++
++                    const dispatchEventSpy = sinon.spy(client, 'dispatchEvent');
++
++                    client._sock._websocket._receiveData(new Uint8Array(data));
++
++                    expect(client._asyncClipboard.writeClipboard.calledOnceWith(
++                        expectedData
++                    )).to.be.true;
++                    expect(dispatchEventSpy.calledOnceWith(
++                        new CustomEvent("clipboard", {detail: {expectedData: expectedData}})
++                    )).to.be.true;
++                });
++
+                 describe('Handle Provide', function () {
+-                    it('should update clipboard with correct Unicode data from a Provide message', function () {
++                    it('should update clipboard with correct Unicode data from a Provide message', async function () {
++                        client._viewOnly = false;
++                        client._asyncClipboard = {
++                            writeClipboard: sinon.stub().returns(false),
++                        };
+                         let expectedData = "Aå漢字!";
+                         let data = [3, 0, 0, 0];
+                         const flags = [0x10, 0x00, 0x00, 0x01];
+@@ -3545,16 +3639,23 @@ describe('Remote Frame Buffer protocol client', function () {
+                         data = data.concat(flags);
+                         data = data.concat(Array.from(deflatedText));
+ 
+-                        const spy = sinon.spy();
+-                        client.addEventListener("clipboard", spy);
++                        const dispatchEventSpy = sinon.spy(client, 'dispatchEvent');
+ 
+                         client._sock._websocket._receiveData(new Uint8Array(data));
+-                        expect(spy).to.have.been.calledOnce;
+-                        expect(spy.args[0][0].detail.text).to.equal(expectedData);
+-                        client.removeEventListener("clipboard", spy);
++
++                        expect(client._asyncClipboard.writeClipboard.calledOnceWith(
++                            expectedData
++                        )).to.be.true;
++                        expect(dispatchEventSpy.calledOnceWith(
++                            new CustomEvent("clipboard", {detail: {expectedData: expectedData}})
++                        )).to.be.true;
+                     });
+ 
+-                    it('should update clipboard with correct escape characters from a Provide message ', function () {
++                    it('should update clipboard with correct escape characters from a Provide message ', async function () {
++                        client._viewOnly = false;
++                        client._asyncClipboard = {
++                            writeClipboard: sinon.stub().returns(false),
++                        };
+                         let expectedData = "Oh\nmy\n!";
+                         let data = [3, 0, 0, 0];
+                         const flags = [0x10, 0x00, 0x00, 0x01];
+@@ -3569,16 +3670,23 @@ describe('Remote Frame Buffer protocol client', function () {
+                         data = data.concat(flags);
+                         data = data.concat(Array.from(deflatedText));
+ 
+-                        const spy = sinon.spy();
+-                        client.addEventListener("clipboard", spy);
++                        const dispatchEventSpy = sinon.spy(client, 'dispatchEvent');
+ 
+                         client._sock._websocket._receiveData(new Uint8Array(data));
+-                        expect(spy).to.have.been.calledOnce;
+-                        expect(spy.args[0][0].detail.text).to.equal(expectedData);
+-                        client.removeEventListener("clipboard", spy);
++
++                        expect(client._asyncClipboard.writeClipboard.calledOnceWith(
++                            expectedData
++                        )).to.be.true;
++                        expect(dispatchEventSpy.calledOnceWith(
++                            new CustomEvent("clipboard", {detail: {expectedData: expectedData}})
++                        )).to.be.true;
+                     });
+ 
+-                    it('should be able to handle large Provide messages', function () {
++                    it('should be able to handle large Provide messages', async function () {
++                        client._viewOnly = false;
++                        client._asyncClipboard = {
++                            writeClipboard: sinon.stub().returns(false),
++                        };
+                         let expectedData = "hello".repeat(100000);
+                         let data = [3, 0, 0, 0];
+                         const flags = [0x10, 0x00, 0x00, 0x01];
+@@ -3593,13 +3701,16 @@ describe('Remote Frame Buffer protocol client', function () {
+                         data = data.concat(flags);
+                         data = data.concat(Array.from(deflatedText));
+ 
+-                        const spy = sinon.spy();
+-                        client.addEventListener("clipboard", spy);
++                        const dispatchEventSpy = sinon.spy(client, 'dispatchEvent');
+ 
+                         client._sock._websocket._receiveData(new Uint8Array(data));
+-                        expect(spy).to.have.been.calledOnce;
+-                        expect(spy.args[0][0].detail.text).to.equal(expectedData);
+-                        client.removeEventListener("clipboard", spy);
++
++                        expect(client._asyncClipboard.writeClipboard.calledOnceWith(
++                            expectedData
++                        )).to.be.true;
++                        expect(dispatchEventSpy.calledOnceWith(
++                            new CustomEvent("clipboard", {detail: {expectedData: expectedData}})
++                        )).to.be.true;
+                     });
+ 
+                 });

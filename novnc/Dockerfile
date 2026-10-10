@@ -5,7 +5,10 @@
 #   index.html     - upstream has none, so "/" would be a directory listing
 #   vnc.html       - overrides UI methods to remember credentials in
 #                    localStorage and pin the server's RSA key (TOFU).
-#                    app/ and core/ stay stock, so upgrades drop straight in.
+#
+# app/ and core/ are stock apart from patches/, which carries the shared
+# clipboard until a noVNC release has it. See patches/README.md before
+# moving NOVNC_REF.
 FROM python:3.12-slim
 
 ARG NOVNC_REF=v1.7.0
@@ -17,6 +20,16 @@ RUN apt-get update \
     && git clone --depth 1 --branch ${NOVNC_REF} \
        https://github.com/novnc/noVNC /opt/novnc \
     && rm -rf /opt/novnc/.git
+
+# Applied in order, and the build fails if one does not apply: a patch that
+# half-applies to a newer noVNC is worse than no image.
+COPY patches/ /tmp/novnc-patches/
+RUN cd /opt/novnc \
+    && for p in /tmp/novnc-patches/*.patch; do \
+         echo "novnc: applying $(basename "$p")"; \
+         git apply "$p" || exit 1; \
+       done \
+    && rm -rf /tmp/novnc-patches
 
 COPY defaults.json mandatory.json index.html /opt/novnc/
 
