@@ -63,6 +63,7 @@ RUN cd /src/weston \
 FROM weston-src AS vnc-backend-builder
 
 COPY vnc-backend/*.patch /patches/
+COPY libweston/*.patch /patches/libweston/
 
 # One at a time, in glob order. `git apply --check /patches/*.patch` cannot be
 # used here: --check never writes, so every patch is checked against the
@@ -74,12 +75,24 @@ RUN set -eux; \
     for patch in /patches/*.patch; do \
       echo "applying $patch"; \
       git apply "$patch"; \
+    done; \
+    for patch in /patches/libweston/*.patch; do \
+      echo "applying $patch"; \
+      git apply "$patch"; \
     done
+# libweston-16.so is taken too (see libweston/), so the build uses Debian's
+# own compiler flags rather than meson's -O0 debug default, and Debian's
+# directories: the library compiles its module and data paths in, and with
+# meson's /usr/local prefix it looks for every backend where none is.
 RUN cd /src/weston \
-    && meson setup build \
+    && eval "$(dpkg-buildflags --export=sh)" \
+    && meson setup build --buildtype=plain \
+       --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+       --libdir=lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH) \
        -Dbackend-rdp=true -Dbackend-vnc=true -Drenderer-vulkan=true \
        -Dsystemd=true -Ddoc=false \
-    && ninja -C build libweston/backend-vnc/vnc-backend.so
+    && ninja -C build libweston/backend-vnc/vnc-backend.so \
+       libweston/libweston-16.so.0.0.0
 
 # =============================================================================
 # Stage 2: build neatvnc with the RA2ne security types
@@ -135,7 +148,7 @@ COPY --from=keyboard-builder /src/weston/build/clients/weston-keyboard \
      /usr/local/bin/centroidx-keyboard
 RUN chmod 755 /usr/local/bin/centroidx-keyboard
 
-# The patched libneatvnc, over Debian's copy. Weston itself is not rebuilt:
+# The patched libneatvnc, over Debian's copy. Weston is not rebuilt for it:
 # the patch adds no symbols and changes nothing that crosses the ABI.
 COPY --from=neatvnc-builder /src/neatvnc/build/libneatvnc.so.1 /tmp/libneatvnc.so.1
 RUN set -eux; \
@@ -155,6 +168,20 @@ RUN set -eux; \
     test -f "$target"; \
     cp /tmp/vnc-backend.so "$target"; \
     rm /tmp/vnc-backend.so
+
+# The patched libweston, over Debian's copy. Without it, a cursor surface a
+# client shares between two seats' pointers -- flutter-elinux keeps one for
+# all of them -- dereferences NULL once the other seat drops it, which a
+# second VNC client disconnecting or entering the on-screen keyboard does.
+# See libweston/README.md.
+COPY --from=vnc-backend-builder \
+     /src/weston/build/libweston/libweston-16.so.0.0.0 /tmp/libweston-16.so.0.0.0
+RUN set -eux; \
+    target=$(ls /usr/lib/*/libweston-16.so.0.0.0); \
+    test -f "$target"; \
+    cp /tmp/libweston-16.so.0.0.0 "$target"; \
+    rm /tmp/libweston-16.so.0.0.0; \
+    ldconfig
 
 # 3. Copy in your weston.ini
 #    ensure config dir exists

@@ -1,0 +1,63 @@
+From 9ed611d95c2bd08119b5c454327ff42b330d4277 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B3n=20Bjarni=20Bjarnason?= <jon@centroid.is>
+Date: Wed, 21 Oct 2026 10:22:57 +0000
+Subject: [PATCH] input: re-take a cursor surface another pointer has released
+
+A client may pass the same wl_surface to wl_pointer.set_cursor on the
+wl_pointer of more than one seat. flutter-elinux does exactly that: it
+keeps one cursor surface and sets it on whichever pointer entered last.
+The surface has a single committed hook, so committed_private names one
+pointer, the last one to set it, while every pointer that set it keeps a
+sprite view of it.
+
+When one of those pointers drops its sprite -- its seat loses the
+pointer capability (a VNC client disconnects), it sets another surface
+because it entered another client, or it sets a NULL cursor --
+pointer_unmap_sprite() clears the surface's committed and
+committed_private regardless of which pointer they belong to. The other
+pointer still has pointer->sprite->surface == surface. Its next
+set_cursor with the same surface and a different hotspot (the client
+changing cursor shape) skips the role setup, because the sprite already
+shows that surface, and calls pointer_cursor_surface_committed()
+directly, which reads pointer->sprite through the NULL
+committed_private:
+
+  segfault at 90 ... in libweston-16.so.0.0.0[3ebd2]
+  #0 pointer_cursor_surface_committed (input.c:3584)
+  #1 pointer_set_cursor (input.c:3662)
+
+Treat a sprite whose surface this pointer does not own as no sprite:
+unmap it and set the surface up again, which makes this pointer the
+owner. Both the early return for an unchanged cursor and the setup
+branch now check ownership.
+---
+ libweston/input.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/libweston/input.c b/libweston/input.c
+index 3be879bb..2851f5d3 100644
+--- a/libweston/input.c
++++ b/libweston/input.c
+@@ -3631,11 +3631,18 @@ pointer_set_cursor(struct wl_client *client, struct wl_resource *resource,
+ 		return;
+ 	}
+ 
++	/* A client may hand the same wl_surface to the wl_pointer of more
++	 * than one seat. The surface has one committed hook, so only the
++	 * pointer in committed_private owns it; another pointer can unmap
++	 * the sprite and clear that hook while this one still shows the
++	 * surface. Take the surface back instead of trusting the sprite. */
+ 	if (pointer->sprite && pointer->sprite->surface == surface &&
++	    surface->committed_private == pointer &&
+ 	    pointer->hotspot.c.x == x && pointer->hotspot.c.y == y)
+ 		return;
+ 
+-	if (!pointer->sprite || pointer->sprite->surface != surface) {
++	if (!pointer->sprite || pointer->sprite->surface != surface ||
++	    surface->committed_private != pointer) {
+ 		if (weston_surface_set_role(surface, "wl_pointer-cursor",
+ 					    resource,
+ 					    WL_POINTER_ERROR_ROLE) < 0)
+-- 
+2.39.5 (Apple Git-154)
+
