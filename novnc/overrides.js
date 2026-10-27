@@ -1,8 +1,8 @@
         // ------------------------------------------------------------------
         // CentroidX: remember credentials, and pin the server key (TOFU).
         //
-        // Everything below only overrides UI methods -- app/ui.js and core/
-        // are stock, so a noVNC upgrade drops straight in.
+        // Everything below only overrides UI methods or fills in settings;
+        // what had to change inside app/ and core/ is in patches/.
         //
         // Credentials live in localStorage, never in defaults.json: that file
         // is served to anyone who can reach this page.
@@ -20,11 +20,23 @@
         // station name comes from NOVNC_STATION_NAME via the entrypoint, so
         // one image can serve "CentroidX - Frystar" and "CentroidX - Pokkun".
         let station = '';
+        let stationSettings = {};
         try {
             const r = await fetch('./branding.json');
-            if (r.ok) { station = (await r.json()).station || ''; }
+            if (r.ok) {
+                stationSettings = await r.json();
+                station = stationSettings.station || '';
+            }
         } catch (err) {
             Log.Warn("Couldn't fetch branding.json: " + err);
+        }
+
+        // Shared clipboard (patches/): on unless the station was started
+        // with NOVNC_SHARED_CLIPBOARD=off. A station that says off means it
+        // for every browser, so it goes in mandatory and the URL cannot
+        // turn it back on.
+        if (stationSettings.shared_clipboard === false) {
+            mandatory['shared_clipboard'] = false;
         }
         const PAGE_TITLE = station ? `CentroidX - ${station}` : 'CentroidX';
         document.title = PAGE_TITLE;

@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B3n=20Bjarni=20Bjarnason?= <jon@centroid.is>
+Date: Sat, 10 Oct 2026 17:00:00 +0000
+Subject: [PATCH] CentroidX: resend clipboard text that lost characters before
+ the caps
+
+The canvas is focused the moment a connection is up, so the async
+clipboard sends the local clipboard straight away. The server's
+extended clipboard capabilities arrive a few milliseconds later, which
+means that first text always goes out as a plain ClientCutText: ISO
+8859-1, with every other character replaced by '?'. Later sends use
+the extended clipboard and arrive whole.
+
+Remember a text that lost characters that way, and send it again
+through the extended clipboard when the capabilities turn up. Text
+that fits ISO 8859-1 is not sent twice, and nothing changes against a
+server without the extended clipboard.
+
+Not upstream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ core/rfb.js | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/core/rfb.js b/core/rfb.js
+index 02f533c..171e8a9 100644
+--- a/core/rfb.js
++++ b/core/rfb.js
+@@ -160,6 +160,7 @@ export default class RFB extends EventTargetMixin {
+         this._extendedPointerEventSupported = false;
+ 
+         this._clipboardText = null;
++        this._clipboardLossyText = null;
+         this._clipboardServerCapabilitiesActions = {};
+         this._clipboardServerCapabilitiesFormats = {};
+ 
+@@ -536,6 +537,9 @@ export default class RFB extends EventTargetMixin {
+                 /* Only ISO 8859-1 is supported */
+                 if (code > 0xff) {
+                     code = 0x3f; // '?'
++                    // Worth sending again if the server turns out to
++                    // speak the extended clipboard after all
++                    this._clipboardLossyText = text;
+                 }
+ 
+                 data[i++] = code;
+@@ -2411,6 +2415,18 @@ export default class RFB extends EventTargetMixin {
+                 ];
+                 RFB.messages.extendedClipboardCaps(this._sock, clientActions, {extendedClipboardFormatText: 0});
+ 
++                // Text sent before these capabilities arrived had to go
++                // out as ISO 8859-1. If that cost it characters, send
++                // it again now that it can go out whole.
++                if (this._clipboardLossyText !== null) {
++                    const lossyText = this._clipboardLossyText;
++                    this._clipboardLossyText = null;
++                    if (this._clipboardServerCapabilitiesFormats[extendedClipboardFormatText] &&
++                        this._clipboardServerCapabilitiesActions[extendedClipboardActionNotify]) {
++                        this.clipboardPasteFrom(lossyText);
++                    }
++                }
++
+             } else if (actions === extendedClipboardActionRequest) {
+                 if (this._viewOnly) {
+                     return true;
