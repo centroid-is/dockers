@@ -1,0 +1,59 @@
+# build and push the rust-pg-test image to ghcr.io
+
+name: Build and Push rust-pg-test Docker Image
+
+on:
+  workflow_dispatch:  # Allows manual trigger (e.g. to pick up a new stable Rust)
+  push:
+    # main only — a feature branch must never republish :latest.
+    branches:
+      - main
+    paths:
+      - 'rust-pg-test/**'
+      - '.github/workflows/rust-pg-test.yml'
+  pull_request:
+    paths:
+      - 'rust-pg-test/**'
+      - '.github/workflows/rust-pg-test.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A pull request gets its own moving tag so the image can be tried in a
+      # job without touching :latest — ghcr.io/<owner>/rust-pg-test:pr-<number>.
+      # Pushes to main tag the commit sha and :latest. Jobs that use the image
+      # should pin it by digest (printed below), not by :latest.
+      - name: Work out image tags
+        id: tags
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "tags=ghcr.io/${{ github.repository_owner }}/rust-pg-test:pr-${{ github.event.number }}" >> $GITHUB_OUTPUT
+          else
+            echo "tags=ghcr.io/${{ github.repository_owner }}/rust-pg-test:${{ github.sha }},ghcr.io/${{ github.repository_owner }}/rust-pg-test:latest" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v4
+        with:
+          context: ./rust-pg-test
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+
+      - name: Digest
+        run: echo "ghcr.io/${{ github.repository_owner }}/rust-pg-test@${{ steps.build.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
