@@ -61,31 +61,3 @@ docker run --rm -e WESTON_WRAPPER_DRY_RUN=1 \
 
 `sh weston/test/wrapper-test.sh` runs the resolution tests; CI runs them before
 building the image.
-
-## rust-pg-test: a CI image for Rust with PostgreSQL
-
-`ghcr.io/centroid-is/rust-pg-test` holds what a Rust test job would otherwise
-download on every run: the stable toolchain (with a C toolchain, OpenSSL headers
-and pkg-config), `cargo-nextest` and the PostgreSQL 17 client tools (`pg_dump`,
-`pg_restore`, `psql`). It holds no project code; the PostgreSQL server is a
-separate `postgres:17` container.
-
-```yaml
-jobs:
-  test:
-    runs-on: self-hosted
-    container:
-      image: ghcr.io/centroid-is/rust-pg-test@sha256:<digest>
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_PASSWORD: test
-    steps:
-      - uses: actions/checkout@v4
-      - run: cargo nextest run --locked
-```
-
-Pin the image by digest (the build prints it) so a new stable Rust arrives when
-the job's file says so, not in the middle of a release. Run the workflow by hand
-to rebuild on a newer toolchain.
